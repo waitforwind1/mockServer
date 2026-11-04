@@ -637,11 +637,11 @@ export default function AppBar({ onClearServer, onClearLogs, onClearExpectations
                   key={tab.value}
                   selected={view === tab.value}
                   aria-current={view === tab.value ? 'page' : undefined}
-                  aria-label={tab.ariaLabel}
+                  aria-label={t(NAV_TAB_ARIA_KEYS[tab.value])}
                   onClick={() => handleSelectView(tab.value)}
                 >
                   <ListItemIcon>{tab.icon}</ListItemIcon>
-                  <ListItemText>{tab.label}</ListItemText>
+                  <ListItemText>{t(NAV_TAB_LABEL_KEYS[tab.value])}</ListItemText>
                 </MenuItem>
               ))}
             </Menu>

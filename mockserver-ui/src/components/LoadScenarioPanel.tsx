@@ -91,6 +91,8 @@ const IDLE_POLL_MS = 5000;
 const MAX_SAMPLES = 120;
 
 const responsiveWidth = (px: number) => ({ width: { xs: '100%', sm: px } });
+type Translate = (english: string, chinese: string) => string;
+const englishOnly: Translate = (english) => english;
 // Responsive grid for author-form field rows — fields fill available width and wrap
 // uniformly via CSS Grid auto-fit (matching ServiceChaosPanel's CHAOS_GRID), so columns
 // line up across rows instead of each row stretching its own items independently.
@@ -305,28 +307,28 @@ const EMPTY_FORM: FormState = {
  * {@link LoadStageDTO} carrying only the fields relevant to its type/mode. Validates: ≥1 stage,
  * ≥1 non-PAUSE (load) stage, every duration > 0, and ramp stages supply both endpoints.
  */
-function buildProfile(stages: StageFormState[]): { stages: LoadStageDTO[] } | { error: string } {
-  if (stages.length === 0) return { error: 'At least one stage is required' };
+function buildProfile(stages: StageFormState[], tr: Translate = englishOnly): { stages: LoadStageDTO[] } | { error: string } {
+  if (stages.length === 0) return { error: tr('At least one stage is required', '至少需要一个阶段') };
   const out: LoadStageDTO[] = [];
   let hasLoadStage = false;
   for (let i = 0; i < stages.length; i++) {
     const s = stages[i]!;
-    const label = `Stage ${i + 1}`;
+    const label = tr(`Stage ${i + 1}`, `阶段 ${i + 1}`);
     const durationMillis = num(s.durationMillis);
-    if (durationMillis == null || durationMillis <= 0) return { error: `${label}: duration (ms) must be greater than 0` };
+    if (durationMillis == null || durationMillis <= 0) return { error: tr(`${label}: duration (ms) must be greater than 0`, `${label}：持续时间（毫秒）必须大于 0`) };
 
     const stage: LoadStageDTO = { type: s.type, durationMillis };
     if (s.type === 'VU') {
       hasLoadStage = true;
       if (s.mode === 'HOLD') {
         const vus = num(s.vus);
-        if (vus == null || vus < 1) return { error: `${label}: virtual users (VUs) must be at least 1` };
+        if (vus == null || vus < 1) return { error: tr(`${label}: virtual users (VUs) must be at least 1`, `${label}：虚拟用户数（VU）必须至少为 1`) };
         stage.vus = vus;
       } else {
         const startVus = num(s.startVus);
         const endVus = num(s.endVus);
-        if (startVus == null || startVus < 0) return { error: `${label}: start VUs must be 0 or greater` };
-        if (endVus == null || endVus < 1) return { error: `${label}: end VUs must be at least 1` };
+        if (startVus == null || startVus < 0) return { error: tr(`${label}: start VUs must be 0 or greater`, `${label}：起始 VU 必须大于或等于 0`) };
+        if (endVus == null || endVus < 1) return { error: tr(`${label}: end VUs must be at least 1`, `${label}：结束 VU 必须至少为 1`) };
         stage.startVus = startVus;
         stage.endVus = endVus;
         stage.curve = s.curve;
@@ -335,27 +337,27 @@ function buildProfile(stages: StageFormState[]): { stages: LoadStageDTO[] } | { 
       hasLoadStage = true;
       if (s.mode === 'HOLD') {
         const rate = num(s.rate);
-        if (rate == null || rate <= 0) return { error: `${label}: rate (iterations/sec) must be greater than 0` };
+        if (rate == null || rate <= 0) return { error: tr(`${label}: rate (iterations/sec) must be greater than 0`, `${label}：速率（迭代/秒）必须大于 0`) };
         stage.rate = rate;
       } else {
         const startRate = num(s.startRate);
         const endRate = num(s.endRate);
-        if (startRate == null || startRate < 0) return { error: `${label}: start rate must be 0 or greater` };
-        if (endRate == null || endRate <= 0) return { error: `${label}: end rate must be greater than 0` };
+        if (startRate == null || startRate < 0) return { error: tr(`${label}: start rate must be 0 or greater`, `${label}：起始速率必须大于或等于 0`) };
+        if (endRate == null || endRate <= 0) return { error: tr(`${label}: end rate must be greater than 0`, `${label}：结束速率必须大于 0`) };
         stage.startRate = startRate;
         stage.endRate = endRate;
         stage.curve = s.curve;
       }
       const maxVus = num(s.maxVus);
       if (maxVus != null) {
-        if (maxVus < 1) return { error: `${label}: max VUs must be at least 1 (or leave blank)` };
+        if (maxVus < 1) return { error: tr(`${label}: max VUs must be at least 1 (or leave blank)`, `${label}：最大 VU 必须至少为 1（或留空）`) };
         stage.maxVus = maxVus;
       }
     }
     // PAUSE: only durationMillis.
     out.push(stage);
   }
-  if (!hasLoadStage) return { error: 'At least one VU or RATE stage is required (a profile of only pauses drives no load)' };
+  if (!hasLoadStage) return { error: tr('At least one VU or RATE stage is required (a profile of only pauses drives no load)', '至少需要一个 VU 或 RATE 阶段（仅包含暂停阶段的配置不会产生负载）') };
   return { stages: out };
 }
 
@@ -364,60 +366,60 @@ function buildProfile(stages: StageFormState[]): { stages: LoadStageDTO[] } | { 
  * declarative shape is emitted (the server expands it into stages); in STAGES mode the explicit
  * stage cards are validated and emitted.
  */
-function buildProfileFromForm(form: FormState): { profile: LoadScenarioDTO['profile'] } | { error: string } {
+function buildProfileFromForm(form: FormState, tr: Translate = englishOnly): { profile: LoadScenarioDTO['profile'] } | { error: string } {
   if (form.profileMode === 'SHAPE') {
-    const built = buildShape(form.shape);
+    const built = buildShape(form.shape, tr);
     if ('error' in built) return { error: built.error };
     return { profile: { shape: built.shape } };
   }
-  const built = buildProfile(form.stages);
+  const built = buildProfile(form.stages, tr);
   if ('error' in built) return { error: built.error };
   return { profile: { stages: built.stages } };
 }
 
 /** Validate + build a LoadShape from the shape card, or return a validation message. */
-function buildShape(form: ShapeFormState): { shape: LoadShapeDTO } | { error: string } {
+function buildShape(form: ShapeFormState, tr: Translate = englishOnly): { shape: LoadShapeDTO } | { error: string } {
   const shape: LoadShapeDTO = { type: form.type, metric: form.metric };
-  const positive = (raw: string, label: string): number | { error: string } => {
+  const positive = (raw: string, label: string, chineseLabel: string): number | { error: string } => {
     const v = num(raw);
-    if (v == null || v <= 0) return { error: `Shape: ${label} must be greater than 0` };
+    if (v == null || v <= 0) return { error: tr(`Shape: ${label} must be greater than 0`, `负载形状：${chineseLabel}必须大于 0`) };
     return v;
   };
   if (form.type === 'SPIKE') {
     shape.curve = form.curve;
     const baseline = num(form.baseline) ?? 0;
-    const peak = positive(form.peak, 'peak');
+    const peak = positive(form.peak, 'peak', '峰值');
     if (typeof peak === 'object') return peak;
-    const rampUp = positive(form.rampUpMillis, 'ramp-up (ms)');
+    const rampUp = positive(form.rampUpMillis, 'ramp-up (ms)', '上升时间（毫秒）');
     if (typeof rampUp === 'object') return rampUp;
-    const hold = positive(form.holdMillis, 'hold (ms)');
+    const hold = positive(form.holdMillis, 'hold (ms)', '保持时间（毫秒）');
     if (typeof hold === 'object') return hold;
-    const rampDown = positive(form.rampDownMillis, 'ramp-down (ms)');
+    const rampDown = positive(form.rampDownMillis, 'ramp-down (ms)', '下降时间（毫秒）');
     if (typeof rampDown === 'object') return rampDown;
     shape.baseline = baseline; shape.peak = peak; shape.rampUpMillis = rampUp; shape.holdMillis = hold; shape.rampDownMillis = rampDown;
     const recovery = num(form.recoveryHoldMillis);
     if (recovery != null) {
-      if (recovery < 0) return { error: 'Shape: recovery hold (ms) must be 0 or greater (or leave blank)' };
+      if (recovery < 0) return { error: tr('Shape: recovery hold (ms) must be 0 or greater (or leave blank)', '负载形状：恢复保持时间（毫秒）必须大于或等于 0（或留空）') };
       shape.recoveryHoldMillis = recovery;
     }
   } else if (form.type === 'STAIRS') {
     const start = num(form.start);
-    if (start == null || start < 0) return { error: 'Shape: start must be 0 or greater' };
-    const step = positive(form.step, 'step rise');
+    if (start == null || start < 0) return { error: tr('Shape: start must be 0 or greater', '负载形状：起始值必须大于或等于 0') };
+    const step = positive(form.step, 'step rise', '每级增量');
     if (typeof step === 'object') return step;
-    const steps = positive(form.steps, 'number of steps');
+    const steps = positive(form.steps, 'number of steps', '级数');
     if (typeof steps === 'object') return steps;
-    const stepDur = positive(form.stepDurationMillis, 'step duration (ms)');
+    const stepDur = positive(form.stepDurationMillis, 'step duration (ms)', '每级持续时间（毫秒）');
     if (typeof stepDur === 'object') return stepDur;
     shape.start = start; shape.step = step; shape.steps = steps; shape.stepDurationMillis = stepDur;
   } else {
     // RAMP_HOLD
     shape.curve = form.curve;
-    const target = positive(form.target, 'target');
+    const target = positive(form.target, 'target', '目标值');
     if (typeof target === 'object') return target;
-    const ramp = positive(form.rampMillis, 'ramp (ms)');
+    const ramp = positive(form.rampMillis, 'ramp (ms)', '渐变时间（毫秒）');
     if (typeof ramp === 'object') return ramp;
-    const hold = positive(form.holdMillis, 'hold (ms)');
+    const hold = positive(form.holdMillis, 'hold (ms)', '保持时间（毫秒）');
     if (typeof hold === 'object') return hold;
     shape.target = target; shape.rampMillis = ramp; shape.holdMillis = hold;
   }
@@ -425,22 +427,23 @@ function buildShape(form: ShapeFormState): { shape: LoadShapeDTO } | { error: st
 }
 
 /** Build a LoadScenarioDTO from the form, or return a validation message. */
-function buildScenario(form: FormState): { scenario: LoadScenarioDTO } | { error: string } {
-  if (form.name.trim() === '') return { error: 'Scenario name is required' };
+function buildScenario(form: FormState, tr: Translate = englishOnly): { scenario: LoadScenarioDTO } | { error: string } {
+  if (form.name.trim() === '') return { error: tr('Scenario name is required', '场景名称为必填项') };
 
-  const builtProfile = buildProfileFromForm(form);
+  const builtProfile = buildProfileFromForm(form, tr);
   if ('error' in builtProfile) return { error: builtProfile.error };
   const profile = builtProfile.profile;
 
-  if (form.steps.length === 0) return { error: 'At least one step is required' };
+  if (form.steps.length === 0) return { error: tr('At least one step is required', '至少需要一个步骤') };
   const weighted = form.stepSelection === 'WEIGHTED';
   const steps: LoadStepDTO[] = [];
   for (let i = 0; i < form.steps.length; i++) {
     const s = form.steps[i]!;
-    if (s.host.trim() === '') return { error: `Step ${i + 1}: target host is required` };
+    const stepLabel = tr(`Step ${i + 1}`, `步骤 ${i + 1}`);
+    if (s.host.trim() === '') return { error: tr(`${stepLabel}: target host is required`, `${stepLabel}：目标主机为必填项`) };
     const port = num(s.port);
-    if (port == null || port < 1 || port > 65535) return { error: `Step ${i + 1}: target port must be 1–65535` };
-    if (s.path.trim() === '') return { error: `Step ${i + 1}: path is required` };
+    if (port == null || port < 1 || port > 65535) return { error: tr(`${stepLabel}: target port must be 1–65535`, `${stepLabel}：目标端口必须在 1–65535 之间`) };
+    if (s.path.trim() === '') return { error: tr(`${stepLabel}: path is required`, `${stepLabel}：路径为必填项`) };
 
     const socketAddress: SocketAddressDTO = { host: s.host.trim(), port, scheme: s.scheme };
     const step: LoadStepDTO = {
@@ -452,16 +455,16 @@ function buildScenario(form: FormState): { scenario: LoadScenarioDTO } | { error
     if (s.name.trim() !== '') step.name = s.name.trim();
     const thinkTimeMs = num(s.thinkTimeMs);
     if (thinkTimeMs != null) {
-      if (thinkTimeMs < 0) return { error: `Step ${i + 1}: think time (ms) must be 0 or greater` };
+      if (thinkTimeMs < 0) return { error: tr(`${stepLabel}: think time (ms) must be 0 or greater`, `${stepLabel}：思考时间（毫秒）必须大于或等于 0`) };
       step.thinkTime = { timeUnit: 'MILLISECONDS', value: thinkTimeMs };
     }
-    const captures = buildCaptures(s.captures);
-    if ('error' in captures) return { error: `Step ${i + 1}: ${captures.error}` };
+    const captures = buildCaptures(s.captures, tr);
+    if ('error' in captures) return { error: tr(`Step ${i + 1}: ${captures.error}`, `步骤 ${i + 1}：${captures.error}`) };
     if (captures.captures.length > 0) step.captures = captures.captures;
     if (weighted) {
       const weight = num(s.weight);
       if (weight != null) {
-        if (weight <= 0) return { error: `Step ${i + 1}: weight must be greater than 0 under WEIGHTED selection` };
+        if (weight <= 0) return { error: tr(`${stepLabel}: weight must be greater than 0 under WEIGHTED selection`, `${stepLabel}：使用 WEIGHTED 选择时，权重必须大于 0`) };
         step.weight = weight;
       }
     }
@@ -476,12 +479,12 @@ function buildScenario(form: FormState): { scenario: LoadScenarioDTO } | { error
   };
   const maxRequests = num(form.maxRequests);
   if (maxRequests != null) {
-    if (maxRequests < 1) return { error: 'Max requests must be at least 1 (or leave blank for unlimited)' };
+    if (maxRequests < 1) return { error: tr('Max requests must be at least 1 (or leave blank for unlimited)', '最大请求数必须至少为 1（或留空表示无限制）') };
     scenario.maxRequests = maxRequests;
   }
   const startDelayMillis = num(form.startDelayMillis);
   if (startDelayMillis != null) {
-    if (startDelayMillis < 0) return { error: 'Start delay (ms) must be 0 or greater (or leave blank for none)' };
+    if (startDelayMillis < 0) return { error: tr('Start delay (ms) must be 0 or greater (or leave blank for none)', '启动延迟（毫秒）必须大于或等于 0（或留空表示无延迟）') };
     scenario.startDelayMillis = startDelayMillis;
   }
   const labels = labelRowsToObject(form.labels);
@@ -489,25 +492,25 @@ function buildScenario(form: FormState): { scenario: LoadScenarioDTO } | { error
 
   if (form.stepSelection !== 'SEQUENTIAL') scenario.stepSelection = form.stepSelection;
 
-  const thresholds = buildThresholds(form.thresholds);
+  const thresholds = buildThresholds(form.thresholds, tr);
   if ('error' in thresholds) return { error: thresholds.error };
   if (thresholds.thresholds.length > 0) {
     scenario.thresholds = thresholds.thresholds;
     if (form.abortOnFail) scenario.abortOnFail = true;
     const abortGraceMillis = num(form.abortGraceMillis);
     if (abortGraceMillis != null) {
-      if (abortGraceMillis < 0) return { error: 'Abort grace (ms) must be 0 or greater (or leave blank)' };
+      if (abortGraceMillis < 0) return { error: tr('Abort grace (ms) must be 0 or greater (or leave blank)', '中止宽限期（毫秒）必须大于或等于 0（或留空）') };
       scenario.abortGraceMillis = abortGraceMillis;
     }
   }
 
   if (form.pacingMode !== 'NONE') {
     const value = num(form.pacingValue);
-    if (value == null || value <= 0) return { error: 'Pacing value must be greater than 0 when a pacing mode is selected' };
+    if (value == null || value <= 0) return { error: tr('Pacing value must be greater than 0 when a pacing mode is selected', '选择节奏模式后，节奏值必须大于 0') };
     scenario.pacing = { mode: form.pacingMode, value };
   }
 
-  const feeder = buildFeeder(form.feeder);
+  const feeder = buildFeeder(form.feeder, tr);
   if ('error' in feeder) return { error: feeder.error };
   if (feeder.feeder) scenario.feeder = feeder.feeder;
 
@@ -515,27 +518,27 @@ function buildScenario(form: FormState): { scenario: LoadScenarioDTO } | { error
 }
 
 /** Validate + build the threshold list, or return a validation message. */
-function buildThresholds(rows: ThresholdFormState[]): { thresholds: LoadThresholdDTO[] } | { error: string } {
+function buildThresholds(rows: ThresholdFormState[], tr: Translate = englishOnly): { thresholds: LoadThresholdDTO[] } | { error: string } {
   const out: LoadThresholdDTO[] = [];
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i]!;
     const threshold = num(r.threshold);
-    if (threshold == null) return { error: `Threshold ${i + 1}: a numeric threshold value is required` };
+    if (threshold == null) return { error: tr(`Threshold ${i + 1}: a numeric threshold value is required`, `阈值 ${i + 1}：必须填写数值阈值`) };
     out.push({ metric: r.metric, comparator: r.comparator, threshold });
   }
   return { thresholds: out };
 }
 
 /** Validate + build a step's capture list, or return a (step-relative) validation message. */
-function buildCaptures(rows: CaptureFormState[]): { captures: LoadCaptureDTO[] } | { error: string } {
+function buildCaptures(rows: CaptureFormState[], tr: Translate = englishOnly): { captures: LoadCaptureDTO[] } | { error: string } {
   const out: LoadCaptureDTO[] = [];
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i]!;
     const name = r.name.trim();
     const expression = r.expression.trim();
     if (name === '' && expression === '') continue; // an untouched row → skip
-    if (name === '') return { error: `capture ${i + 1} needs a variable name` };
-    if (expression === '') return { error: `capture ${i + 1} (${name}) needs an expression` };
+    if (name === '') return { error: tr(`capture ${i + 1} needs a variable name`, `捕获项 ${i + 1} 需要变量名称`) };
+    if (expression === '') return { error: tr(`capture ${i + 1} (${name}) needs an expression`, `捕获项 ${i + 1}（${name}）需要表达式`) };
     const capture: LoadCaptureDTO = { name, source: r.source, expression };
     if (r.defaultValue.trim() !== '') capture.defaultValue = r.defaultValue;
     out.push(capture);
@@ -544,10 +547,10 @@ function buildCaptures(rows: CaptureFormState[]): { captures: LoadCaptureDTO[] }
 }
 
 /** Build the feeder from its editor, or return a validation message; null when disabled/empty. */
-function buildFeeder(form: FeederFormState): { feeder: LoadFeederDTO | null } | { error: string } {
+function buildFeeder(form: FeederFormState, tr: Translate = englishOnly): { feeder: LoadFeederDTO | null } | { error: string } {
   if (!form.enabled) return { feeder: null };
   if (form.mode === 'RAW') {
-    if (form.rawData.trim() === '') return { error: 'Feeder: raw data is required (or disable the feeder)' };
+    if (form.rawData.trim() === '') return { error: tr('Feeder: raw data is required (or disable the feeder)', '数据供给器：必须填写原始数据（或禁用数据供给器）') };
     return { feeder: { data: form.rawData, format: form.rawFormat, strategy: form.strategy } };
   }
   const rows: Record<string, string>[] = [];
@@ -559,7 +562,7 @@ function buildFeeder(form: FeederFormState): { feeder: LoadFeederDTO | null } | 
     }
     if (Object.keys(obj).length > 0) rows.push(obj);
   }
-  if (rows.length === 0) return { error: 'Feeder: at least one non-empty row is required (or disable the feeder)' };
+  if (rows.length === 0) return { error: tr('Feeder: at least one non-empty row is required (or disable the feeder)', '数据供给器：至少需要一个非空数据行（或禁用数据供给器）') };
   return { feeder: { rows, strategy: form.strategy } };
 }
 
@@ -1184,7 +1187,7 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
   // load generation is disabled. Records the submitted scenario so "Edit running"
   // can reload it. Returns the registered scenario (or null on validation error).
   const registerForm = useCallback(async (): Promise<LoadScenarioDTO | null> => {
-    const built = buildScenario(form);
+    const built = buildScenario(form, tr);
     if ('error' in built) {
       setActionError({ message: built.error });
       return null;
@@ -1196,7 +1199,7 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
       ok = true;
     });
     return ok ? built.scenario : null;
-  }, [connectionParams, form, runAction]);
+  }, [connectionParams, form, runAction, tr]);
 
   const handleLoad = useCallback(() => {
     void registerForm();
@@ -1252,27 +1255,33 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
   const deleteOne = useCallback((entry: RegisteredScenario) => {
     const active = entry.state === 'RUNNING' || entry.state === 'PENDING';
     setConfirm({
-      title: `Delete ${entry.name}?`,
-      message: `This removes ${entry.name} from the registry${active ? ' and stops its run' : ''}. This cannot be undone.`,
-      confirmLabel: 'Delete',
+      title: tr(`Delete ${entry.name}?`, `删除 ${entry.name}？`),
+      message: tr(
+        `This removes ${entry.name} from the registry${active ? ' and stops its run' : ''}. This cannot be undone.`,
+        `这会从注册表中移除 ${entry.name}${active ? '并停止其运行' : ''}。此操作无法撤销。`,
+      ),
+      confirmLabel: tr('Delete', '删除'),
       onConfirm: () => void runAction(async () => {
         await deleteLoadScenario(connectionParams, entry.name);
       }),
     });
-  }, [connectionParams, runAction]);
+  }, [connectionParams, runAction, tr]);
 
   const clearAll = useCallback(() => {
     const activeCount = registry.filter((s) => s.state === 'RUNNING' || s.state === 'PENDING').length;
     setConfirm({
-      title: 'Clear all load scenarios?',
-      message: `This removes all ${registry.length} registered scenario${registry.length === 1 ? '' : 's'}`
-        + `${activeCount > 0 ? ` and stops ${activeCount} active run${activeCount === 1 ? '' : 's'}` : ''}. This cannot be undone.`,
-      confirmLabel: 'Clear all',
+      title: tr('Clear all load scenarios?', '清除所有负载场景？'),
+      message: tr(
+        `This removes all ${registry.length} registered scenario${registry.length === 1 ? '' : 's'}`
+          + `${activeCount > 0 ? ` and stops ${activeCount} active run${activeCount === 1 ? '' : 's'}` : ''}. This cannot be undone.`,
+        `这会移除全部 ${registry.length} 个已注册场景${activeCount > 0 ? `，并停止 ${activeCount} 个活动运行` : ''}。此操作无法撤销。`,
+      ),
+      confirmLabel: tr('Clear all', '全部清除'),
       onConfirm: () => void runAction(async () => {
         await clearLoadScenarios(connectionParams);
       }),
     });
-  }, [connectionParams, registry, runAction]);
+  }, [connectionParams, registry, runAction, tr]);
 
   // Load a registered scenario's definition back into the author form for tweaking.
   const editRegistered = useCallback((entry: RegisteredScenario) => {
@@ -1479,7 +1488,7 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
   // validity. The strict buildScenario still gates the Load / Load & Run submit actions above; here
   // we only surface its message as a non-blocking inline hint about what is still needed to run.
   const codeScenario = useMemo(() => buildPartialScenario(form), [form]);
-  const validation = useMemo(() => buildScenario(form), [form]);
+  const validation = useMemo(() => buildScenario(form, tr), [form, tr]);
   const codeError = 'error' in validation ? validation.error : null;
 
   const statusColor = running ? 'success' : headerState === 'completed' ? 'info' : headerState === 'stopped' ? 'warning' : 'default';
@@ -1500,19 +1509,21 @@ export default function LoadScenarioPanel({ connectionParams }: LoadScenarioPane
       {disabled && (
         <Alert severity="info" sx={{ mb: 1.5 }} data-testid="load-disabled-alert">
           <AlertTitle>{tr('Load generation is disabled', '负载生成已禁用')}</AlertTitle>
-          Load scenarios are off by default. Start MockServer with load generation enabled to drive
-          traffic from here:
+          {tr(
+            'Load scenarios are off by default. Start MockServer with load generation enabled to drive traffic from here:',
+            '负载场景默认关闭。启动 MockServer 时启用负载生成功能，即可从此处生成流量：',
+          )}
           <Box component="pre" sx={{ mt: 1, mb: 1, p: 1, bgcolor: 'action.hover', borderRadius: 1, typography: 'subtitle2', fontWeight: 400, overflow: 'auto' }}>
 {`-Dmockserver.loadGenerationEnabled=true
-# or environment variable:
+# ${tr('or environment variable:', '或使用环境变量：')}
 MOCKSERVER_LOAD_GENERATION_ENABLED=true`}
           </Box>
-          For deeper analysis, the{' '}
-          <Link component="button" type="button" onClick={() => setView('metrics')}>Metrics tab</Link>{' '}
-          surfaces the <code>mock_server_load_*</code> Prometheus/OTEL series. See the{' '}
+          {tr('For deeper analysis, the ', '如需深入分析，')}
+          <Link component="button" type="button" onClick={() => setView('metrics')}>{tr('Metrics tab', '指标选项卡')}</Link>{' '}
+          {tr('surfaces the ', '会显示 ')}<code>mock_server_load_*</code>{tr(' Prometheus/OTEL series. See the ', ' Prometheus/OTEL 序列。请参阅')}
           <Link href="https://www.mock-server.com/mock_server/load_injection.html" target="_blank" rel="noopener noreferrer">
-            load injection docs
-          </Link>.
+            {tr('load injection docs', '负载注入文档')}
+          </Link>{tr('.', '。')}
         </Alert>
       )}
 

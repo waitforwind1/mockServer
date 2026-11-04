@@ -530,10 +530,8 @@ function bodyEditorConfig(type: BodyMatcherType): { language: string; schema?: o
  * Non-blocking helper text for a matcher line-list field: undefined when every
  * line parses, otherwise "N line(s) ignored — expected <format>".
  */
-function ignoredLinesWarning(text: string, separator: ':' | '=', formatHint: string): string | undefined {
-  const n = ignoredKeyValueLines(text, separator).length;
-  if (n === 0) return undefined;
-  return `${n} line${n === 1 ? '' : 's'} ignored — expected ${formatHint}`;
+function ignoredLineCount(text: string, separator: ':' | '='): number {
+  return ignoredKeyValueLines(text, separator).length;
 }
 
 const ALLOF_SUB_TYPES: { value: AllOfSubBodyType; label: string }[] = [
@@ -559,7 +557,7 @@ function AllOfMatcherRows({ matcher, setMatcher }: { matcher: MatcherState; setM
   return (
     <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 1 }} data-testid="allof-section">
       <Typography variant="caption" color="text.secondary">
-        The request body must satisfy every sub-matcher below (logical AND). Add two or more.
+        {tr('The request body must satisfy every sub-matcher below (logical AND). Add two or more.', '请求体必须满足下方每个子匹配器（逻辑 AND）。请添加两个或更多。')}
       </Typography>
       {rows.map((row, idx) => (
         <Paper key={idx} variant="outlined" sx={{ p: 1, display: 'flex', gap: 1, alignItems: 'flex-start' }} data-testid="allof-row">
@@ -573,7 +571,9 @@ function AllOfMatcherRows({ matcher, setMatcher }: { matcher: MatcherState; setM
             slotProps={{ htmlInput: { 'data-testid': `allof-type-${idx}` } }}
           >
             {ALLOF_SUB_TYPES.map((t) => (
-              <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>
+              <MenuItem key={t.value} value={t.value}>
+                {t.value === 'string' ? tr(t.label, '字符串（精确）') : t.label}
+              </MenuItem>
             ))}
           </TextField>
           <TextField
@@ -597,7 +597,7 @@ function AllOfMatcherRows({ matcher, setMatcher }: { matcher: MatcherState; setM
       ))}
       <Box>
         <Button size="small" variant="outlined" onClick={addRow} data-testid="add-allof-row">
-          Add sub-matcher
+          {tr('Add sub-matcher', '添加子匹配器')}
         </Button>
       </Box>
     </Box>
@@ -619,7 +619,7 @@ function JwtMatcherSection({ matcher, setMatcher }: { matcher: MatcherState; set
             size="small"
             checked={enabled}
             onChange={(e) => setMatcher({ ...matcher, jwt: e.target.checked ? (matcher.jwt ?? {}) : undefined })}
-            slotProps={{ input: { 'aria-label': 'Match a JWT', 'data-testid': 'jwt-enable' } as Record<string, unknown> }}
+            slotProps={{ input: { 'aria-label': tr('Match a JWT', '匹配 JWT'), 'data-testid': 'jwt-enable' } as Record<string, unknown> }}
           />
         }
         label={<Typography variant="body2">{tr('Match a JWT (JSON Web Token)', '匹配 JWT（JSON Web Token）')}</Typography>}
@@ -627,7 +627,7 @@ function JwtMatcherSection({ matcher, setMatcher }: { matcher: MatcherState; set
       <Collapse in={enabled} unmountOnExit>
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mt: 1 }}>
           <Typography variant="caption" color="text.secondary">
-            Matches claims in a JWT carried in a request header. No signature is verified — this is request routing, not authentication.
+            {tr('Matches claims in a JWT carried in a request header. No signature is verified — this is request routing, not authentication.', '匹配请求头中 JWT 所携带的 Claim。不验证签名——这用于请求路由，而非身份认证。')}
           </Typography>
           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
             <TextField
@@ -698,10 +698,19 @@ function MatcherPanel({ matcher, setMatcher }: { matcher: MatcherState; setMatch
   // Non-blocking warnings for lines that MockServer's codegen will drop. They do
   // NOT change what is registered — malformed lines are still dropped — they just
   // surface the silent loss so a typo'd matcher isn't shipped unnoticed.
-  const headersWarning = ignoredLinesWarning(matcher.headers, ':', 'Name: value');
-  const queryWarning = ignoredLinesWarning(matcher.queryString, '=', 'key=value');
-  const cookiesWarning = ignoredLinesWarning(matcher.cookies, '=', 'name=value');
-  const pathParamsWarning = ignoredLinesWarning(matcher.pathParams, '=', 'name=value');
+  const warning = (text: string, separator: ':' | '=', formatHint: string, zhFormatHint: string) => {
+    const n = ignoredLineCount(text, separator);
+    return n === 0
+      ? undefined
+      : tr(
+        `${n} line${n === 1 ? '' : 's'} ignored — expected ${formatHint}`,
+        `已忽略 ${n} 行——应采用 ${zhFormatHint} 格式`,
+      );
+  };
+  const headersWarning = warning(matcher.headers, ':', 'Name: value', 'Name: value');
+  const queryWarning = warning(matcher.queryString, '=', 'key=value', 'key=value');
+  const cookiesWarning = warning(matcher.cookies, '=', 'name=value', 'name=value');
+  const pathParamsWarning = warning(matcher.pathParams, '=', 'name=value', 'name=value');
   const [dateTimeOpen, setDateTimeOpen] = useState(false);
   const [bodyDateTimeOpen, setBodyDateTimeOpen] = useState(false);
   const bodyDateTimeProblem = bodyDateTimeError(matcher.bodyDateTime);
@@ -737,13 +746,13 @@ function MatcherPanel({ matcher, setMatcher }: { matcher: MatcherState; setMatch
           sx={{ flex: 1, minWidth: 200 }}
           value={matcher.path}
           onChange={(e) => setMatcher({ ...matcher, path: e.target.value })}
-          placeholder="/foo/bar  ·  prefix with ! to negate"
+          placeholder={tr('/foo/bar  ·  prefix with ! to negate', '/foo/bar  ·  使用 ! 前缀表示取反')}
         />
       </Box>
       <Box sx={{ mt: -1, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
         <Typography variant="caption" color="text.secondary" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, flex: 1 }}>
-          Prefix any string field or any line below with <code>!</code> to negate the match.
-          <InfoTip text="A leading ! means &quot;must NOT match this value&quot;. e.g. path !/admin matches every path except /admin; header !Authorization: … matches requests that do not carry that header. A value written as a JSON object is a matcher object, e.g. X-Issued-At: {&quot;after&quot;:&quot;now -1 hours&quot;} compares the header as a date-time." />
+          {tr('Prefix any string field or any line below with', '在任意字符串字段或下方任意行前添加')} <code>!</code> {tr('to negate the match.', '即可对匹配取反。')}
+          <InfoTip text={tr('A leading ! means "must NOT match this value". e.g. path !/admin matches every path except /admin; header !Authorization: … matches requests that do not carry that header. A value written as a JSON object is a matcher object, e.g. X-Issued-At: {"after":"now -1 hours"} compares the header as a date-time.', '前导 ! 表示“不得匹配此值”。例如，路径 !/admin 匹配除 /admin 外的所有路径；请求头 !Authorization: … 匹配不携带该请求头的请求。写成 JSON 对象的值是匹配器对象，例如 X-Issued-At: {"after":"now -1 hours"} 会将该请求头作为日期时间比较。')} />
         </Typography>
         <Button size="small" onClick={() => setDateTimeOpen(true)}>{tr('Add Date-Time Matcher', '添加日期时间匹配器')}</Button>
       </Box>
@@ -876,6 +885,30 @@ function MatcherPanel({ matcher, setMatcher }: { matcher: MatcherState; setMatch
                                 : matcher.bodyMatcherType === 'wasm'
                                   ? 'WASM module name'
                                   : 'Body matcher (string)';
+          const bodyLabelZh =
+            matcher.bodyMatcherType === 'binary'
+              ? '请求体匹配器（Base64 字节）'
+              : matcher.bodyMatcherType === 'graphql'
+                ? 'GraphQL 查询'
+                : matcher.bodyMatcherType === 'json'
+                  ? 'JSON 请求体匹配器'
+                  : matcher.bodyMatcherType === 'json-schema'
+                    ? 'JSON Schema'
+                    : matcher.bodyMatcherType === 'json-path'
+                      ? 'JSON Path 表达式'
+                      : matcher.bodyMatcherType === 'xml'
+                        ? 'XML 请求体'
+                        : matcher.bodyMatcherType === 'xml-schema'
+                          ? 'XML Schema（XSD）'
+                          : matcher.bodyMatcherType === 'xpath'
+                            ? 'XPath 表达式'
+                            : matcher.bodyMatcherType === 'regex'
+                              ? '正则表达式'
+                              : matcher.bodyMatcherType === 'parameters'
+                                ? '参数（每行 key=value）'
+                                : matcher.bodyMatcherType === 'wasm'
+                                  ? 'WASM 模块名称'
+                                  : '请求体匹配器（字符串）';
           const bodyPlaceholder =
             matcher.bodyMatcherType === 'binary'
               ? 'SGVsbG8sIFdvcmxkIQ=='
@@ -907,8 +940,8 @@ function MatcherPanel({ matcher, setMatcher }: { matcher: MatcherState; setMatch
             matcher.bodyMatcherType === 'regex';
           return (
             <JsonEditor
-              label={bodyLabel}
-              ariaLabel={bodyLabel}
+              label={tr(bodyLabel, bodyLabelZh)}
+              ariaLabel={tr(bodyLabel, bodyLabelZh)}
               language={editorConfig.language}
               schema={editorConfig.schema}
               value={matcher.body}
@@ -928,7 +961,10 @@ function MatcherPanel({ matcher, setMatcher }: { matcher: MatcherState; setMatch
               onChange={(e) => setMatcher({ ...matcher, bodyDateTime: e.target.value })}
               placeholder='{"after":"now -1 days"}'
               error={!!bodyDateTimeProblem}
-              helperText={bodyDateTimeProblem ?? `Matches when a value the ${matcher.bodyMatcherType === 'xpath' ? 'XPath' : 'JSON Path'} selects is a date-time that satisfies this comparison.`}
+              helperText={bodyDateTimeProblem ?? tr(
+                `Matches when a value the ${matcher.bodyMatcherType === 'xpath' ? 'XPath' : 'JSON Path'} selects is a date-time that satisfies this comparison.`,
+                `当 ${matcher.bodyMatcherType === 'xpath' ? 'XPath' : 'JSON Path'} 选中的值为满足此比较条件的日期时间时匹配。`,
+              )}
               slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
             />
             <Button size="small" sx={{ mt: 0.5 }} onClick={() => setBodyDateTimeOpen(true)}>{tr('Build Date-Time Comparison', '构建日期时间比较')}</Button>
@@ -994,7 +1030,7 @@ function MatcherPanel({ matcher, setMatcher }: { matcher: MatcherState; setMatch
               <MenuItem value="ONLY_MATCHING_FIELDS">{tr('Only matching fields (default)', '仅匹配指定字段（默认）')}</MenuItem>
               <MenuItem value="STRICT">{tr('Strict (all fields must match)', '严格（所有字段必须匹配）')}</MenuItem>
             </TextField>
-            <InfoTip text="Only matching fields: the request must contain the fields you list (extra fields are ignored) — best for partial matches. Strict: the request body must match exactly, with no extra or missing fields." />
+            <InfoTip text={tr('Only matching fields: the request must contain the fields you list (extra fields are ignored) — best for partial matches. Strict: the request body must match exactly, with no extra or missing fields.', '仅匹配指定字段：请求必须包含列出的字段（忽略额外字段），最适合部分匹配。严格：请求体必须完全匹配，不能有额外或缺失字段。')} />
           </Box>
         )}
         {matcher.bodyMatcherType === 'string' && (
@@ -1033,7 +1069,7 @@ function MatcherPanel({ matcher, setMatcher }: { matcher: MatcherState; setMatch
           label={tr('Client IP', '客户端 IP')}
           size="small"
           placeholder="10.0.0.0/8"
-          helperText="IP or CIDR, ! to negate; TCP peer, not X-Forwarded-For"
+          helperText={tr('IP or CIDR, ! to negate; TCP peer, not X-Forwarded-For', 'IP 或 CIDR；使用 ! 取反。匹配 TCP 对端，而非 X-Forwarded-For')}
           sx={{ width: { xs: '100%', sm: 220 } }}
           value={matcher.clientIp}
           onChange={(e) => setMatcher({ ...matcher, clientIp: e.target.value })}
@@ -1045,7 +1081,7 @@ function MatcherPanel({ matcher, setMatcher }: { matcher: MatcherState; setMatch
           sx={{ width: { xs: '100%', sm: 230 } }}
           value={matcher.priority}
           onChange={(e) => setMatcher({ ...matcher, priority: Number(e.target.value) || 0 })}
-          slotProps={{ input: infoAdornment('When several mocks match the same request, the one with the highest priority wins. Leave at 0 unless you need to override a more general mock.') }}
+          slotProps={{ input: infoAdornment(tr('When several mocks match the same request, the one with the highest priority wins. Leave at 0 unless you need to override a more general mock.', '当多个模拟规则匹配同一请求时，优先级最高者生效。除非需要覆盖更通用的模拟规则，否则保留为 0。')) }}
         />
         <TextField
           label={tr('Times (0 = unlimited)', '次数（0 = 不限）')}
@@ -1054,7 +1090,7 @@ function MatcherPanel({ matcher, setMatcher }: { matcher: MatcherState; setMatch
           sx={{ width: { xs: '100%', sm: 200 } }}
           value={matcher.times}
           onChange={(e) => setMatcher({ ...matcher, times: Math.max(0, Number(e.target.value) || 0) })}
-          slotProps={{ input: infoAdornment('How many times this mock will respond before it stops matching. 0 means unlimited — it responds to every matching request.') }}
+          slotProps={{ input: infoAdornment(tr('How many times this mock will respond before it stops matching. 0 means unlimited — it responds to every matching request.', '此模拟规则在停止匹配前可响应的次数。0 表示不限次数，即响应每个匹配请求。')) }}
         />
         <TextField
           label={tr('Time to live (s, 0 = forever)', '生存时间（秒，0 = 永久）')}
@@ -1063,7 +1099,7 @@ function MatcherPanel({ matcher, setMatcher }: { matcher: MatcherState; setMatch
           sx={{ width: { xs: '100%', sm: 230 } }}
           value={matcher.ttlSeconds}
           onChange={(e) => setMatcher({ ...matcher, ttlSeconds: Math.max(0, Number(e.target.value) || 0) })}
-          slotProps={{ input: infoAdornment('The mock auto-expires this many seconds after it is registered. 0 means it never expires.') }}
+          slotProps={{ input: infoAdornment(tr('The mock auto-expires this many seconds after it is registered. 0 means it never expires.', '模拟规则在注册后经过指定秒数自动过期。0 表示永不过期。')) }}
         />
       </Box>
     </Box>
@@ -1107,7 +1143,7 @@ function DnsMatcherPanel({
         value={dnsMatcher.dnsName}
         onChange={(e) => setDnsMatcher({ ...dnsMatcher, dnsName: e.target.value })}
         placeholder="example.com"
-        helperText="required — the server routes to a DNS matcher when dnsName is present"
+        helperText={tr('required — the server routes to a DNS matcher when dnsName is present', '必填——存在 dnsName 时，服务器会将请求路由到 DNS 匹配器')}
         slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
       />
       <Box sx={{ display: 'flex', gap: 1 }}>
@@ -1119,7 +1155,7 @@ function DnsMatcherPanel({
           onChange={(e) => setDnsMatcher({ ...dnsMatcher, dnsType: e.target.value as DnsRecordType | '' })}
           sx={{ minWidth: 160 }}
         >
-          <MenuItem value="">(any)</MenuItem>
+          <MenuItem value="">{tr('(any)', '（任意）')}</MenuItem>
           {(['A', 'AAAA', 'CNAME', 'MX', 'SRV', 'TXT', 'PTR'] as const).map((t) => (
             <MenuItem key={t} value={t}>{t}</MenuItem>
           ))}
@@ -1132,7 +1168,7 @@ function DnsMatcherPanel({
           onChange={(e) => setDnsMatcher({ ...dnsMatcher, dnsClass: e.target.value as DnsRecordClass | '' })}
           sx={{ minWidth: 140 }}
         >
-          <MenuItem value="">(any)</MenuItem>
+          <MenuItem value="">{tr('(any)', '（任意）')}</MenuItem>
           {(['IN', 'CH', 'HS', 'ANY'] as const).map((c) => (
             <MenuItem key={c} value={c}>{c}</MenuItem>
           ))}
@@ -1146,7 +1182,7 @@ function DnsMatcherPanel({
           sx={{ width: { xs: '100%', sm: 230 } }}
           value={matcher.priority}
           onChange={(e) => setMatcher({ ...matcher, priority: Number(e.target.value) || 0 })}
-          slotProps={{ input: infoAdornment('When several mocks match the same request, the one with the highest priority wins. Leave at 0 unless you need to override a more general mock.') }}
+          slotProps={{ input: infoAdornment(tr('When several mocks match the same request, the one with the highest priority wins. Leave at 0 unless you need to override a more general mock.', '当多个模拟规则匹配同一请求时，优先级最高者生效。除非需要覆盖更通用的模拟规则，否则保留为 0。')) }}
         />
         <TextField
           label={tr('Times (0 = unlimited)', '次数（0 = 不限）')}
@@ -1155,7 +1191,7 @@ function DnsMatcherPanel({
           sx={{ width: { xs: '100%', sm: 200 } }}
           value={matcher.times}
           onChange={(e) => setMatcher({ ...matcher, times: Math.max(0, Number(e.target.value) || 0) })}
-          slotProps={{ input: infoAdornment('How many times this mock will respond before it stops matching. 0 means unlimited — it responds to every matching request.') }}
+          slotProps={{ input: infoAdornment(tr('How many times this mock will respond before it stops matching. 0 means unlimited — it responds to every matching request.', '此模拟规则在停止匹配前可响应的次数。0 表示不限次数，即响应每个匹配请求。')) }}
         />
         <TextField
           label={tr('Time to live (s, 0 = forever)', '生存时间（秒，0 = 永久）')}
@@ -1164,7 +1200,7 @@ function DnsMatcherPanel({
           sx={{ width: { xs: '100%', sm: 230 } }}
           value={matcher.ttlSeconds}
           onChange={(e) => setMatcher({ ...matcher, ttlSeconds: Math.max(0, Number(e.target.value) || 0) })}
-          slotProps={{ input: infoAdornment('The mock auto-expires this many seconds after it is registered. 0 means it never expires.') }}
+          slotProps={{ input: infoAdornment(tr('The mock auto-expires this many seconds after it is registered. 0 means it never expires.', '模拟规则在注册后经过指定秒数自动过期。0 表示永不过期。')) }}
         />
       </Box>
     </Box>
@@ -1878,7 +1914,10 @@ function StatusCodeField({
  * instead of the fixed value) or a template (which falls back to the fixed value). A delay is saved
  * whole, so typing a fixed value would replace, and lose, either one.
  */
-const LOCKED_DELAY_HELP = 'This delay uses a distribution, or a template with the fixed value only as its fallback, kept under Other fields. Remove it there to set a fixed delay.';
+const LOCKED_DELAY_HELP: [string, string] = [
+  'This delay uses a distribution, or a template with the fixed value only as its fallback, kept under Other fields. Remove it there to set a fixed delay.',
+  '此延迟使用分布，或使用仅将固定值作为兜底值的模板，并保留在“其他字段”中。请先在那里移除它，再设置固定延迟。',
+];
 
 function isPlainRecord(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v);
@@ -1963,9 +2002,9 @@ function StaticHttpPanel({
             value={state.fileTemplateType}
             onChange={(e) => setState({ ...state, fileTemplateType: e.target.value as StaticState['fileTemplateType'] })}
             sx={{ width: { xs: '100%', sm: 320 } }}
-            helperText="Render the file as a template against the request. JavaScript is not supported for body files — use a Response template for that."
+            helperText={tr('Render the file as a template against the request. JavaScript is not supported for body files — use a Response template for that.', '根据请求将文件渲染为模板。响应体文件不支持 JavaScript；如需使用，请改用响应模板。')}
           >
-            <MenuItem value="">None (serve file verbatim)</MenuItem>
+            <MenuItem value="">{tr('None (serve file verbatim)', '无（按原样提供文件）')}</MenuItem>
             <MenuItem value="MUSTACHE">Mustache</MenuItem>
             <MenuItem value="VELOCITY">Velocity</MenuItem>
           </TextField>
@@ -1982,7 +2021,7 @@ function StaticHttpPanel({
               }
               label={
                 <Typography variant="body2">
-                  Choose the file from the request (template the path, e.g. {'responses/{{ request.pathParameters.name.0 }}.json'})
+                  {tr('Choose the file from the request (template the path, e.g.', '根据请求选择文件（将路径模板化，例如')} {'responses/{{ request.pathParameters.name.0 }}.json'})
                 </Typography>
               }
             />
@@ -1991,7 +2030,7 @@ function StaticHttpPanel({
       ) : (
         <JsonEditor
           label={tr('Response body', '响应体')}
-          ariaLabel="Response body"
+          ariaLabel={tr('Response body', '响应体')}
           language={responseBodyLanguage(state.contentType)}
           value={state.body}
           onChange={(next) => setState({ ...state, body: next })}
@@ -2008,7 +2047,7 @@ function StaticHttpPanel({
           onChange={(e) => setState({ ...state, delayValue: Number(e.target.value) || 0 })}
           sx={{ width: { xs: '100%', sm: delayLocked ? 360 : 180 } }}
           disabled={delayLocked}
-          helperText={delayLocked ? LOCKED_DELAY_HELP : '0 = no delay'}
+          helperText={delayLocked ? tr(...LOCKED_DELAY_HELP) : tr('0 = no delay', '0 = 无延迟')}
         />
         <TextField
           label={tr('Unit', '单位')}
@@ -2101,8 +2140,8 @@ function ForwardPanel({
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
       <Typography variant="body2" color="text.secondary">
-        {tr('MockServer will proxy', 'MockServer 将代理')} the matched request to <code>{state.scheme.toLowerCase()}://{state.host || 'host'}:{state.port}</code>,
-        preserving the path / headers / body.
+        {tr('MockServer will proxy the matched request to', 'MockServer 会将匹配的请求代理到')} <code>{state.scheme.toLowerCase()}://{state.host || 'host'}:{state.port}</code>,
+        {tr('preserving the path / headers / body.', '并保留路径、请求头和请求体。')}
       </Typography>
       <Box sx={{ display: 'flex', gap: 1 }}>
         <TextField
@@ -2174,7 +2213,7 @@ function ForwardOverridePanel({
           sx={{ width: { xs: '100%', sm: 130 } }}
         >
           {['', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((m) => (
-            <MenuItem key={m || 'unchanged'} value={m}>{m || '(unchanged)'}</MenuItem>
+            <MenuItem key={m || 'unchanged'} value={m}>{m || tr('(unchanged)', '（不更改）')}</MenuItem>
           ))}
         </TextField>
         <TextField
@@ -2425,7 +2464,7 @@ function TemplatePanel({
         value={state.templateFile}
         onChange={(e) => setState({ ...state, templateFile: e.target.value })}
         placeholder="templates/some_response.mustache"
-        helperText="Classpath or filesystem path. Used when the inline template above is empty; the inline template wins when both are set."
+        helperText={tr('Classpath or filesystem path. Used when the inline template above is empty; the inline template wins when both are set.', 'Classpath 或文件系统路径。当上方内联模板为空时使用；两者都设置时以内联模板为准。')}
         slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
       />
       <TemplateParametersField value={state.parameters ?? ''} onChange={(parameters) => setState({ ...state, parameters })} />
@@ -2509,7 +2548,7 @@ function ErrorPanel({
           onChange={(e) => setState({ ...state, delayValue: Number(e.target.value) || 0 })}
           sx={{ width: { xs: '100%', sm: delayLocked ? 360 : 180 } }}
           disabled={delayLocked}
-          helperText={delayLocked ? LOCKED_DELAY_HELP : '0 = no delay'}
+          helperText={delayLocked ? tr(...LOCKED_DELAY_HELP) : tr('0 = no delay', '0 = 无延迟')}
         />
         <TextField
           label={tr('Unit', '单位')}
@@ -3362,8 +3401,7 @@ function ForwardTemplatePanel({
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
       <Typography variant="body2" color="text.secondary">
-        Build the forwarded request dynamically using a template engine. The template receives
-        a <code>request</code> object. This is the forward-direction counterpart of the response template.
+        {tr('Build the forwarded request dynamically using a template engine. The template receives a', '使用模板引擎动态构建转发请求。模板会接收一个')} <code>request</code> {tr('object. This is the forward-direction counterpart of the response template.', '对象；它与响应模板相对应，用于转发方向。')}
       </Typography>
       <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
         <TextField
@@ -3405,7 +3443,7 @@ function ForwardTemplatePanel({
         value={state.templateFile ?? ''}
         onChange={(e) => setState({ ...state, templateFile: e.target.value })}
         placeholder="templates/forward_request.mustache"
-        helperText="Classpath or filesystem path. Used when the inline template above is empty; the inline template wins when both are set."
+        helperText={tr('Classpath or filesystem path. Used when the inline template above is empty; the inline template wins when both are set.', 'Classpath 或文件系统路径。当上方内联模板为空时使用；两者都设置时以内联模板为准。')}
         slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
       />
       <TemplateParametersField value={state.parameters ?? ''} onChange={(parameters) => setState({ ...state, parameters })} />
@@ -3428,9 +3466,7 @@ function ForwardClassCallbackPanel({
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
       <Typography variant="body2" color="text.secondary">
-        Invoke a Java class implementing <code>ExpectationForwardCallback</code> on
-        the MockServer instance to build the forwarded request dynamically. The class must already
-        be on MockServer's classpath.
+        {tr('Invoke a Java class implementing', '在 MockServer 实例上调用实现')} <code>ExpectationForwardCallback</code> {tr("on the MockServer instance to build the forwarded request dynamically. The class must already be on MockServer's classpath.", '的 Java 类，以动态构建转发请求。该类必须已位于 MockServer 的 classpath 中。')}
       </Typography>
       <TextField
         label={tr('Callback class (fully-qualified name)', '回调类（完全限定名）')}
@@ -4255,7 +4291,7 @@ function ExistingMocksList({
             color: 'text.secondary',
           }}
         >
-          Existing {label} mocks
+          {tr(`Existing ${label} mocks`, `现有 ${label} 模拟规则`)}
         </Typography>
         {selectedKey && (
           <Button
@@ -4264,21 +4300,23 @@ function ExistingMocksList({
             onClick={onClear}
             sx={{ fontSize: '0.7rem', py: 0, px: 1, minHeight: 24 }}
           >
-            New / clear
+            {tr('New / clear', '新建/清除')}
           </Button>
         )}
       </Box>
 
       {selectedKey && (
         <Alert severity="info" variant="outlined" sx={{ fontSize: '0.72rem', py: 0, px: 1, mb: 0.5, alignItems: 'center', '& .MuiAlert-message': { py: 0.3 }, '& .MuiAlert-icon': { py: 0, alignItems: 'center' } }}>
-          Editing {selectedKey.slice(0, 12)}... — changes update this expectation.
+          {tr(`Editing ${selectedKey.slice(0, 12)}... — changes update this expectation.`, `正在编辑 ${selectedKey.slice(0, 12)}...，所做更改将更新此期望。`)}
         </Alert>
       )}
 
       {truncated && (
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }} data-testid="existing-mocks-window-notice">
-          This list holds the {windowSize} expectations the dashboard keeps live, of {total} on the server.
-          Search by path or id to reach any of them.
+          {tr(
+            `This list holds the ${windowSize} expectations the dashboard keeps live, of ${total} on the server. Search by path or id to reach any of them.`,
+            `此列表显示仪表盘实时保留的 ${windowSize} 个期望；服务器上共有 ${total} 个。可按路径或 ID 搜索全部期望。`,
+          )}
         </Typography>
       )}
 
@@ -4295,19 +4333,19 @@ function ExistingMocksList({
 
       {serverResult?.error && (
         <Alert severity="error" variant="outlined" sx={{ fontSize: '0.72rem', py: 0, px: 1, mb: 0.5 }}>
-          Could not search the server: {serverResult.error}
+          {tr(`Could not search the server: ${serverResult.error}`, `无法搜索服务器：${serverResult.error}`)}
         </Alert>
       )}
 
       {searching ? (
         <Typography variant="body2" color="text.secondary" sx={{ fontStyle: 'italic', py: 1 }}>
-          Searching all {total} expectations…
+          {tr(`Searching all ${total} expectations…`, `正在搜索全部 ${total} 个期望…`)}
         </Typography>
       ) : filtered.length === 0 ? (
         <Typography variant="body2" color="text.secondary" sx={{ fontStyle: 'italic', py: 1 }}>
           {query
-            ? `No ${kindLabel(kind)} mocks match “${query}”.`
-            : `No ${kindLabel(kind)} mocks yet — fill in the form below to add one.`}
+            ? tr(`No ${kindLabel(kind)} mocks match “${query}”.`, `没有与“${query}”匹配的 ${kindLabel(kind)} 模拟规则。`)
+            : tr(`No ${kindLabel(kind)} mocks yet — fill in the form below to add one.`, `尚无 ${kindLabel(kind)} 模拟规则，请填写下方表单进行添加。`)}
         </Typography>
       ) : (
         <Box sx={{ maxHeight: 200, overflowY: 'auto', border: 1, borderColor: 'divider', borderRadius: 1 }}>
@@ -4412,13 +4450,13 @@ function QuickMockForm({
   const { tr } = useI18n();
   const disabledReason =
     matcher.path.trim().length === 0
-      ? 'Enter a request path to match'
+      ? tr('Enter a request path to match', '请输入要匹配的请求路径')
       : responseStatusCodeError(staticState.statusCode) ?? null;
   return (
     <Paper variant="outlined" sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 2 }} data-testid="quick-mock-form">
       <Box>
         <Typography variant="subtitle2" sx={{ mb: 1, textTransform: 'uppercase', letterSpacing: 0.5, color: 'text.secondary' }}>
-          1 · When this request arrives
+          {tr('1 · When this request arrives', '1 · 当收到此请求时')}
         </Typography>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
           <TextField
@@ -4446,7 +4484,7 @@ function QuickMockForm({
 
       <Box>
         <Typography variant="subtitle2" sx={{ mb: 1, textTransform: 'uppercase', letterSpacing: 0.5, color: 'text.secondary' }}>
-          2 · Respond with
+          {tr('2 · Respond with', '2 · 响应内容')}
         </Typography>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap', mb: 1 }}>
           <StatusCodeField
@@ -4472,13 +4510,13 @@ function QuickMockForm({
             maxRows={12}
             value={staticState.body}
             disabled
-            helperText="This mock serves its body from a file — switch to Advanced to edit that."
+            helperText={tr('This mock serves its body from a file — switch to Advanced to edit that.', '此模拟规则从文件提供响应体；请切换到“高级”模式进行编辑。')}
             slotProps={{ input: { sx: { fontFamily: monospaceFontFamily, fontSize: '0.78rem' } } }}
           />
         ) : (
           <JsonEditor
             label={tr('Response body', '响应体')}
-            ariaLabel="Response body"
+            ariaLabel={tr('Response body', '响应体')}
             language={responseBodyLanguage(staticState.contentType)}
             value={staticState.body}
             onChange={(next) => setStaticState({ ...staticState, body: next })}
@@ -4497,8 +4535,10 @@ function QuickMockForm({
           data-testid="quick-preserved-fields-info"
           sx={{ py: 0, '& .MuiAlert-message': { py: 0.75 } }}
         >
-          Preserving {preservedFields.length}{' '}
-          {preservedFields.length === 1 ? 'field' : 'fields'} not shown in this form:{' '}
+          {tr(
+            `Preserving ${preservedFields.length} ${preservedFields.length === 1 ? 'field' : 'fields'} not shown in this form:`,
+            `正在保留此表单未显示的 ${preservedFields.length} 个字段：`,
+          )}{' '}
           <Box component="span" sx={{ fontFamily: monospaceFontFamily }}>
             {preservedFields.join(', ')}
           </Box>
@@ -4515,18 +4555,18 @@ function QuickMockForm({
               disabled={registering || disabledReason !== null}
             >
               {registering
-                ? 'Registering…'
+                ? tr('Registering…', '正在注册…')
                 : editingExisting
-                  ? 'Update mock'
-                  : 'Register mock'}
+                  ? tr('Update mock', '更新模拟规则')
+                  : tr('Register mock', '注册模拟规则')}
             </Button>
           </span>
         </Tooltip>
         <Typography variant="caption" color="text.secondary">
-          Need headers, matchers, forwarding, fault injection, or other response types?{' '}
+          {tr('Need headers, matchers, forwarding, fault injection, or other response types?', '需要请求头、匹配器、转发、故障注入或其他响应类型？')}{' '}
           <Link component="button" type="button" variant="caption" underline="hover" onClick={onSwitchToAdvanced}>
-            Switch to Advanced
-          </Link>.
+            {tr('Switch to Advanced', '切换到高级模式')}
+          </Link>{tr('.', '。')}
         </Typography>
       </Box>
     </Paper>
@@ -6076,8 +6116,10 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
                       data-testid="preserved-fields-info"
                       sx={{ mb: 1, py: 0, '& .MuiAlert-message': { py: 0.75 } }}
                     >
-                      Preserving {preservedFields.length}{' '}
-                      {preservedFields.length === 1 ? 'field' : 'fields'} not shown in this form:{' '}
+                      {tr(
+                        `Preserving ${preservedFields.length} ${preservedFields.length === 1 ? 'field' : 'fields'} not shown in this form:`,
+                        `正在保留此表单未显示的 ${preservedFields.length} 个字段：`,
+                      )}{' '}
                       <Box component="span" sx={{ fontFamily: monospaceFontFamily }}>
                         {preservedFields.join(', ')}
                       </Box>
@@ -6100,7 +6142,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
                           disabled={registering || !canRegister}
                         >
                           {registering
-                            ? 'Registering…'
+                            ? tr('Registering…', '正在注册…')
                             : editingExisting
                               ? tr('Update expectation', '更新期望')
                               : tr('Register expectation', '注册期望')}
@@ -6109,11 +6151,11 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
                     </Tooltip>
                     {editingExisting ? (
                       <Typography variant="caption" color="success.main">
-                        Editing — the Expectation ID will be reused so this updates in place.
+                        {tr('Editing — the Expectation ID will be reused so this updates in place.', '正在编辑：将复用期望 ID，并直接更新现有期望。')}
                       </Typography>
                     ) : (
                       <Typography variant="caption" color="text.secondary">
-                        Leave the Expectation ID blank to create a new one, or paste an existing ID above to update in place.
+                        {tr('Leave the Expectation ID blank to create a new one, or paste an existing ID above to update in place.', '期望 ID 留空可创建新期望；也可在上方粘贴现有 ID 直接更新。')}
                       </Typography>
                     )}
                   </Box>
@@ -6135,7 +6177,7 @@ export default function ComposerView({ connectionParams }: ComposerViewProps) {
           >
             <AlertTitle sx={{ mb: 0.5 }}>{tr('Mock Registered', '模拟规则已注册')}</AlertTitle>
             <Typography variant="body2" sx={{ mb: 1 }}>
-              <code>{registeredLabel}</code> is now live. What next?
+              <code>{registeredLabel}</code> {tr('is now live. What next?', '已生效。接下来要做什么？')}
             </Typography>
             {registeredLintWarnings > 0 && (
               <Box sx={{ mb: 1 }}>

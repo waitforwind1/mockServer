@@ -89,7 +89,7 @@ import { formatRowTime } from '../lib/logEntryTime';
 import type { ConnectionParams } from '../hooks/useConnectionParams';
 import { useFollow } from '../hooks/useFollow';
 import { useTailFollow } from '../hooks/useTailFollow';
-import { useI18n, type TranslateInline } from '../i18n';
+import { useI18n } from '../i18n';
 import { combineTraffic } from '../lib/combineTraffic';
 import { isNonHttpRequestRow } from '../lib/requestKind';
 import {
@@ -804,7 +804,7 @@ function TrafficRowImpl({
           disabled={!compareChecked && compareDisabled}
           onClick={(e) => e.stopPropagation()}
           onChange={handleCompareToggle}
-          slotProps={{ input: { 'aria-label': `Select ${identityLabel} to compare` } }}
+          slotProps={{ input: { 'aria-label': tr(`Select ${identityLabel} to compare`, `选择 ${identityLabel} 进行比较`) } }}
           sx={{ p: 0.25, flexShrink: 0 }}
         />
       )}
@@ -814,7 +814,7 @@ function TrafficRowImpl({
           checked={!!selectChecked}
           onClick={(e) => e.stopPropagation()}
           onChange={handleSelectToggle}
-          slotProps={{ input: { 'aria-label': `Select ${identityLabel}` } }}
+          slotProps={{ input: { 'aria-label': tr(`Select ${identityLabel}`, `选择 ${identityLabel}`) } }}
           sx={{ p: 0.25, flexShrink: 0 }}
         />
       )}
@@ -933,6 +933,7 @@ interface HostTreeProps {
  * rows themselves.
  */
 function HostTree({ hosts, pinnedHost, onPin }: HostTreeProps) {
+  const { tr } = useI18n();
   const [expanded, setExpanded] = useState(true);
 
   return (
@@ -942,7 +943,7 @@ function HostTree({ hosts, pinnedHost, onPin }: HostTreeProps) {
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        aria-label={expanded ? 'Collapse hosts' : 'Expand hosts'}
+        aria-label={expanded ? tr('Collapse hosts', '收起主机列表') : tr('Expand hosts', '展开主机列表')}
         sx={{
           display: 'flex',
           alignItems: 'center',
@@ -964,7 +965,7 @@ function HostTree({ hosts, pinnedHost, onPin }: HostTreeProps) {
           : <ChevronRightIcon sx={{ fontSize: '0.9rem' }} />}
         <DnsIcon sx={{ fontSize: '0.85rem', color: 'text.secondary' }} />
         <Typography variant="caption" sx={{ fontWeight: 600 }}>
-          Hosts
+          {tr('Hosts', '主机')}
         </Typography>
         {pinnedHost && (
           <Typography
@@ -972,7 +973,7 @@ function HostTree({ hosts, pinnedHost, onPin }: HostTreeProps) {
             variant="caption"
             sx={{ fontFamily: monospaceFontFamily, color: 'primary.main', ml: 0.5, overflow: 'hidden', textOverflow: 'ellipsis' }}
           >
-            pinned: {pinnedHost}
+            {tr(`pinned: ${pinnedHost}`, `已固定：${pinnedHost}`)}
           </Typography>
         )}
       </Box>
@@ -990,7 +991,7 @@ function HostTree({ hosts, pinnedHost, onPin }: HostTreeProps) {
                 // at-most-100-row update window, not the host's traffic, so it pins at
                 // the cap under load -- and a wrong number read out to a screen reader is
                 // no better for being invisible on screen.
-                aria-label={`Filter traffic by host ${host}`}
+                aria-label={tr(`Filter traffic by host ${host}`, `按主机 ${host} 筛选流量`)}
                 onClick={() => onPin(active ? null : host)}
                 sx={{
                   display: 'flex',
@@ -1037,11 +1038,12 @@ function HostTree({ hosts, pinnedHost, onPin }: HostTreeProps) {
 // ---------------------------------------------------------------------------
 
 function AnthropicMessagesPanel({ parsed }: { parsed: AnthropicParsed }) {
+  const { tr } = useI18n();
   return (
     <Box>
       {parsed.system != null && (
         <Box sx={{ mb: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>System</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr('System', '系统')}</Typography>
           <Box sx={{ mt: 0.5 }}>
             {typeof parsed.system === 'string' ? (
               <Typography variant="body2" sx={{ fontFamily: monospaceFontFamily, fontSize: '0.75rem', whiteSpace: 'pre-wrap' }}>
@@ -1055,7 +1057,7 @@ function AnthropicMessagesPanel({ parsed }: { parsed: AnthropicParsed }) {
       )}
       {parsed.messages.length > 0 && (
         <Box>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Messages ({parsed.messages.length})</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr(`Messages (${parsed.messages.length})`, `消息 (${parsed.messages.length})`)}</Typography>
           {parsed.messages.map((msg, i) => (
             <Box key={i} sx={{ mt: 0.5, pl: 1, borderLeft: 2, borderColor: 'divider' }}>
               <JsonViewer data={msg as Record<string, unknown>} collapsed={1} />
@@ -1065,14 +1067,14 @@ function AnthropicMessagesPanel({ parsed }: { parsed: AnthropicParsed }) {
       )}
       {parsed.tools && parsed.tools.length > 0 && (
         <Box sx={{ mt: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Tools ({parsed.tools.length})</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr(`Tools (${parsed.tools.length})`, `工具 (${parsed.tools.length})`)}</Typography>
           <JsonViewer data={parsed.tools as unknown[]} collapsed={1} />
         </Box>
       )}
       <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-        {parsed.model && <Chip label={`Model: ${parsed.model}`} size="small" variant="outlined" />}
-        {parsed.maxTokens !== null && <Chip label={`Max tokens: ${parsed.maxTokens}`} size="small" variant="outlined" />}
-        {parsed.stream && <Chip label="Streaming" size="small" color="info" variant="outlined" />}
+        {parsed.model && <Chip label={tr(`Model: ${parsed.model}`, `模型：${parsed.model}`)} size="small" variant="outlined" />}
+        {parsed.maxTokens !== null && <Chip label={tr(`Max tokens: ${parsed.maxTokens}`, `最大 token 数：${parsed.maxTokens}`)} size="small" variant="outlined" />}
+        {parsed.stream && <Chip label={tr('Streaming', '流式传输')} size="small" color="info" variant="outlined" />}
       </Box>
     </Box>
   );
@@ -1083,11 +1085,12 @@ function AnthropicMessagesPanel({ parsed }: { parsed: AnthropicParsed }) {
 // ---------------------------------------------------------------------------
 
 function OpenAiMessagesPanel({ parsed }: { parsed: OpenAiParsed }) {
+  const { tr } = useI18n();
   return (
     <Box>
       {parsed.messages.length > 0 && (
         <Box>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Messages ({parsed.messages.length})</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr(`Messages (${parsed.messages.length})`, `消息 (${parsed.messages.length})`)}</Typography>
           {parsed.messages.map((msg, i) => (
             <Box key={i} sx={{ mt: 0.5, pl: 1, borderLeft: 2, borderColor: 'divider' }}>
               <JsonViewer data={msg as Record<string, unknown>} collapsed={1} />
@@ -1097,13 +1100,13 @@ function OpenAiMessagesPanel({ parsed }: { parsed: OpenAiParsed }) {
       )}
       {parsed.tools && parsed.tools.length > 0 && (
         <Box sx={{ mt: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Tools ({parsed.tools.length})</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr(`Tools (${parsed.tools.length})`, `工具 (${parsed.tools.length})`)}</Typography>
           <JsonViewer data={parsed.tools as unknown[]} collapsed={1} />
         </Box>
       )}
       <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-        {parsed.model && <Chip label={`Model: ${parsed.model}`} size="small" variant="outlined" />}
-        {parsed.stream && <Chip label="Streaming" size="small" color="info" variant="outlined" />}
+        {parsed.model && <Chip label={tr(`Model: ${parsed.model}`, `模型：${parsed.model}`)} size="small" variant="outlined" />}
+        {parsed.stream && <Chip label={tr('Streaming', '流式传输')} size="small" color="info" variant="outlined" />}
       </Box>
     </Box>
   );
@@ -1114,6 +1117,7 @@ function OpenAiMessagesPanel({ parsed }: { parsed: OpenAiParsed }) {
 // ---------------------------------------------------------------------------
 
 function McpDetailPanel({ parsed, statusCode }: { parsed: McpParsed; statusCode: number | null }) {
+  const { tr } = useI18n();
   const { isError, code, message } = mcpErrorInfo(parsed, statusCode);
   return (
     <Box>
@@ -1124,11 +1128,11 @@ function McpDetailPanel({ parsed, statusCode }: { parsed: McpParsed; statusCode:
           color={isError ? 'error' : 'info'}
           variant={isError ? 'filled' : 'outlined'}
         />
-        {parsed.method && <Chip label={`Method: ${parsed.method}`} size="small" variant="outlined" />}
+        {parsed.method && <Chip label={tr(`Method: ${parsed.method}`, `方法：${parsed.method}`)} size="small" variant="outlined" />}
         {parsed.id != null && <Chip label={`ID: ${String(parsed.id)}`} size="small" variant="outlined" />}
         {isError && (
           <Chip
-            label={code != null ? `Error ${code}` : 'Error'}
+            label={code != null ? tr(`Error ${code}`, `错误 ${code}`) : tr('Error', '错误')}
             size="small"
             color="error"
             variant="outlined"
@@ -1137,20 +1141,23 @@ function McpDetailPanel({ parsed, statusCode }: { parsed: McpParsed; statusCode:
       </Box>
       {parsed.params != null && (
         <Box sx={{ mb: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Params</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr('Params', '参数')}</Typography>
           <JsonViewer data={parsed.params as Record<string, unknown>} collapsed={2} />
         </Box>
       )}
       {parsed.result != null && (
         <Box sx={{ mb: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Result</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr('Result', '结果')}</Typography>
           <JsonViewer data={parsed.result as Record<string, unknown>} collapsed={2} />
         </Box>
       )}
       {parsed.error != null && (
         <Box sx={{ mb: 1 }}>
           <Typography variant="caption" color="error" sx={{ fontWeight: 600 }}>
-            Error{code != null ? ` (code ${code})` : ''}{message ? `: ${message}` : ''}
+            {tr(
+              `Error${code != null ? ` (code ${code})` : ''}${message ? `: ${message}` : ''}`,
+              `错误${code != null ? `（代码 ${code}）` : ''}${message ? `：${message}` : ''}`,
+            )}
           </Typography>
           <JsonViewer data={parsed.error as Record<string, unknown>} collapsed={2} />
         </Box>
@@ -1164,11 +1171,12 @@ function McpDetailPanel({ parsed, statusCode }: { parsed: McpParsed; statusCode:
 // ---------------------------------------------------------------------------
 
 function OpenAiResponsesMessagesPanel({ parsed }: { parsed: OpenAiResponsesParsed }) {
+  const { tr } = useI18n();
   return (
     <Box>
       {parsed.input.length > 0 && (
         <Box>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Input ({parsed.input.length})</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr(`Input (${parsed.input.length})`, `输入 (${parsed.input.length})`)}</Typography>
           {parsed.input.map((item, i) => (
             <Box key={i} sx={{ mt: 0.5, pl: 1, borderLeft: 2, borderColor: 'divider' }}>
               <JsonViewer data={item as Record<string, unknown>} collapsed={1} />
@@ -1178,7 +1186,7 @@ function OpenAiResponsesMessagesPanel({ parsed }: { parsed: OpenAiResponsesParse
       )}
       {parsed.output.length > 0 && (
         <Box sx={{ mt: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Output ({parsed.output.length})</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr(`Output (${parsed.output.length})`, `输出 (${parsed.output.length})`)}</Typography>
           {parsed.output.map((item, i) => (
             <Box key={i} sx={{ mt: 0.5, pl: 1, borderLeft: 2, borderColor: 'divider' }}>
               <JsonViewer data={item as Record<string, unknown>} collapsed={1} />
@@ -1187,8 +1195,8 @@ function OpenAiResponsesMessagesPanel({ parsed }: { parsed: OpenAiResponsesParse
         </Box>
       )}
       <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-        {parsed.model && <Chip label={`Model: ${parsed.model}`} size="small" variant="outlined" />}
-        {parsed.stream && <Chip label="Streaming" size="small" color="info" variant="outlined" />}
+        {parsed.model && <Chip label={tr(`Model: ${parsed.model}`, `模型：${parsed.model}`)} size="small" variant="outlined" />}
+        {parsed.stream && <Chip label={tr('Streaming', '流式传输')} size="small" color="info" variant="outlined" />}
       </Box>
     </Box>
   );
@@ -1199,11 +1207,12 @@ function OpenAiResponsesMessagesPanel({ parsed }: { parsed: OpenAiResponsesParse
 // ---------------------------------------------------------------------------
 
 function GeminiMessagesPanel({ parsed }: { parsed: GeminiParsed }) {
+  const { tr } = useI18n();
   return (
     <Box>
       {parsed.contents.length > 0 && (
         <Box>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Contents ({parsed.contents.length})</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr(`Contents (${parsed.contents.length})`, `内容 (${parsed.contents.length})`)}</Typography>
           {parsed.contents.map((item, i) => (
             <Box key={i} sx={{ mt: 0.5, pl: 1, borderLeft: 2, borderColor: 'divider' }}>
               <JsonViewer data={item as Record<string, unknown>} collapsed={1} />
@@ -1213,7 +1222,7 @@ function GeminiMessagesPanel({ parsed }: { parsed: GeminiParsed }) {
       )}
       {parsed.candidates.length > 0 && (
         <Box sx={{ mt: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Candidates ({parsed.candidates.length})</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr(`Candidates (${parsed.candidates.length})`, `候选项 (${parsed.candidates.length})`)}</Typography>
           {parsed.candidates.map((item, i) => (
             <Box key={i} sx={{ mt: 0.5, pl: 1, borderLeft: 2, borderColor: 'divider' }}>
               <JsonViewer data={item as Record<string, unknown>} collapsed={1} />
@@ -1222,7 +1231,7 @@ function GeminiMessagesPanel({ parsed }: { parsed: GeminiParsed }) {
         </Box>
       )}
       <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-        {parsed.model && <Chip label={`Model: ${parsed.model}`} size="small" variant="outlined" />}
+        {parsed.model && <Chip label={tr(`Model: ${parsed.model}`, `模型：${parsed.model}`)} size="small" variant="outlined" />}
       </Box>
     </Box>
   );
@@ -1233,11 +1242,12 @@ function GeminiMessagesPanel({ parsed }: { parsed: GeminiParsed }) {
 // ---------------------------------------------------------------------------
 
 function OllamaMessagesPanel({ parsed }: { parsed: OllamaParsed }) {
+  const { tr } = useI18n();
   return (
     <Box>
       {parsed.messages.length > 0 && (
         <Box>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Messages ({parsed.messages.length})</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr(`Messages (${parsed.messages.length})`, `消息 (${parsed.messages.length})`)}</Typography>
           {parsed.messages.map((msg, i) => (
             <Box key={i} sx={{ mt: 0.5, pl: 1, borderLeft: 2, borderColor: 'divider' }}>
               <JsonViewer data={msg as Record<string, unknown>} collapsed={1} />
@@ -1247,16 +1257,16 @@ function OllamaMessagesPanel({ parsed }: { parsed: OllamaParsed }) {
       )}
       {parsed.responseMessage != null && (
         <Box sx={{ mt: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>Response</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{tr('Response', '响应')}</Typography>
           <Box sx={{ mt: 0.5, pl: 1, borderLeft: 2, borderColor: 'divider' }}>
             <JsonViewer data={parsed.responseMessage as Record<string, unknown>} collapsed={1} />
           </Box>
         </Box>
       )}
       <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-        {parsed.model && <Chip label={`Model: ${parsed.model}`} size="small" variant="outlined" />}
-        {parsed.stream && <Chip label="Streaming" size="small" color="info" variant="outlined" />}
-        {parsed.done && <Chip label="Done" size="small" color="success" variant="outlined" />}
+        {parsed.model && <Chip label={tr(`Model: ${parsed.model}`, `模型：${parsed.model}`)} size="small" variant="outlined" />}
+        {parsed.stream && <Chip label={tr('Streaming', '流式传输')} size="small" color="info" variant="outlined" />}
+        {parsed.done && <Chip label={tr('Done', '已完成')} size="small" color="success" variant="outlined" />}
       </Box>
     </Box>
   );
@@ -1267,12 +1277,13 @@ function OllamaMessagesPanel({ parsed }: { parsed: OllamaParsed }) {
 // ---------------------------------------------------------------------------
 
 function SseTimeline({ events }: { events: SseEvent[] }) {
+  const { tr } = useI18n();
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
 
   return (
     <Box>
       <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, mb: 0.5, display: 'block' }}>
-        SSE Events ({events.length})
+        {tr(`SSE Events (${events.length})`, `SSE 事件 (${events.length})`)}
       </Typography>
       {events.map((evt, i) => {
         const parsedData = (() => {
@@ -1352,6 +1363,7 @@ interface WaterfallSegment {
 }
 
 function TimingWaterfall({ timing }: { timing: RequestTiming }) {
+  const { tr } = useI18n();
   const total = timing.totalTimeInMillis;
   if (total === null || total === 0) return null;
 
@@ -1373,16 +1385,16 @@ function TimingWaterfall({ timing }: { timing: RequestTiming }) {
 
   const realSegments: WaterfallSegment[] = isProxied
     ? [
-        { key: 'connect', label: 'Connect', ms: connect, color: 'warning.main', injected: false },
-        { key: 'wait', label: 'Wait (TTFB)', ms: waitMs, color: 'info.main', injected: false },
-        { key: 'receive', label: 'Receive', ms: receiveMs, color: 'success.main', injected: false },
+        { key: 'connect', label: tr('Connect', '连接'), ms: connect, color: 'warning.main', injected: false },
+        { key: 'wait', label: tr('Wait (TTFB)', '等待 (TTFB)'), ms: waitMs, color: 'info.main', injected: false },
+        { key: 'receive', label: tr('Receive', '接收'), ms: receiveMs, color: 'success.main', injected: false },
       ]
-    : [{ key: 'processing', label: 'Processing', ms: realProcessing, color: 'success.main', injected: false }];
+    : [{ key: 'processing', label: tr('Processing', '处理'), ms: realProcessing, color: 'success.main', injected: false }];
 
   const injectedSegments: WaterfallSegment[] = [
-    { key: 'injected-delay', label: 'Response delay', ms: injectedDelay, color: INJECTED_DELAY_COLOR, injected: true },
-    { key: 'injected-chaos', label: 'Chaos latency', ms: injectedChaos, color: INJECTED_CHAOS_COLOR, injected: true },
-    { key: 'injected-breakpoint', label: 'Breakpoint hold', ms: injectedBreakpoint, color: INJECTED_BREAKPOINT_COLOR, injected: true },
+    { key: 'injected-delay', label: tr('Response delay', '响应延迟'), ms: injectedDelay, color: INJECTED_DELAY_COLOR, injected: true },
+    { key: 'injected-chaos', label: tr('Chaos latency', '混沌延迟'), ms: injectedChaos, color: INJECTED_CHAOS_COLOR, injected: true },
+    { key: 'injected-breakpoint', label: tr('Breakpoint hold', '断点暂停'), ms: injectedBreakpoint, color: INJECTED_BREAKPOINT_COLOR, injected: true },
   ];
 
   // Order: real network/processing first, then the injected latency stacked after it.
@@ -1406,11 +1418,11 @@ function TimingWaterfall({ timing }: { timing: RequestTiming }) {
     >
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
         <Typography variant="caption" sx={{ fontSize: '0.65rem', fontWeight: 600, color: 'text.primary' }}>
-          Timing
+          {tr('Timing', '耗时')}
         </Typography>
         {timing.connectionTimeInMillis !== null && (
           <Chip
-            label={`connect ${timing.connectionTimeInMillis}ms`}
+            label={tr(`connect ${timing.connectionTimeInMillis}ms`, `连接 ${timing.connectionTimeInMillis}ms`)}
             size="small"
             variant="outlined"
             sx={{ height: 18, fontSize: '0.6rem', '& .MuiChip-label': { px: 0.5 } }}
@@ -1427,24 +1439,24 @@ function TimingWaterfall({ timing }: { timing: RequestTiming }) {
         {injectedSum > 0 && (
           <Chip
             data-testid="timing-injected-chip"
-            label={`injected ${injectedSum}ms`}
+            label={tr(`injected ${injectedSum}ms`, `注入 ${injectedSum}ms`)}
             size="small"
             variant="outlined"
             sx={{ height: 18, fontSize: '0.6rem', color: INJECTED_CHAOS_COLOR, borderColor: INJECTED_CHAOS_COLOR, '& .MuiChip-label': { px: 0.5 } }}
           />
         )}
         <Chip
-          label={`total ${total}ms`}
+          label={tr(`total ${total}ms`, `总计 ${total}ms`)}
           size="small"
           variant="outlined"
           color="info"
           sx={{ height: 18, fontSize: '0.6rem', '& .MuiChip-label': { px: 0.5 } }}
         />
         {barTotal > total && (
-          <Tooltip title="Injected latency is applied in addition to the recorded upstream total — this is the combined wall time the client experienced" placement="top" arrow>
+          <Tooltip title={tr('Injected latency is applied in addition to the recorded upstream total — this is the combined wall time the client experienced', '注入延迟会叠加到记录的上游总耗时上——这是客户端实际经历的综合墙钟时间')} placement="top" arrow>
             <Chip
               data-testid="timing-wall-chip"
-              label={`wall ${barTotal}ms`}
+              label={tr(`wall ${barTotal}ms`, `墙钟 ${barTotal}ms`)}
               size="small"
               variant="outlined"
               sx={{ height: 18, fontSize: '0.6rem', '& .MuiChip-label': { px: 0.5 } }}
@@ -1466,7 +1478,10 @@ function TimingWaterfall({ timing }: { timing: RequestTiming }) {
         {segments.map((segment) => (
           <Tooltip
             key={segment.key}
-            title={`${segment.injected ? 'Injected by MockServer' : 'Real'} — ${segment.label}: ${segment.ms}ms${segment.injected ? ' (configured value; random-distribution delays are approximate)' : ''}`}
+            title={tr(
+              `${segment.injected ? 'Injected by MockServer' : 'Real'} — ${segment.label}: ${segment.ms}ms${segment.injected ? ' (configured value; random-distribution delays are approximate)' : ''}`,
+              `${segment.injected ? '由 MockServer 注入' : '实际耗时'} — ${segment.label}：${segment.ms}ms${segment.injected ? '（配置值；随机分布延迟为近似值）' : ''}`,
+            )}
             placement="top"
             arrow
           >
@@ -1484,7 +1499,7 @@ function TimingWaterfall({ timing }: { timing: RequestTiming }) {
       {/* Legend grouped into Real vs Injected so the differentiator is explicit */}
       <Box sx={{ display: 'flex', gap: 1.5, justifyContent: 'flex-start', flexWrap: 'wrap' }}>
         <Box data-testid="timing-legend-real" sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
-          <Typography variant="caption" sx={{ fontSize: '0.55rem', fontWeight: 600, color: 'text.secondary' }}>Real:</Typography>
+          <Typography variant="caption" sx={{ fontSize: '0.55rem', fontWeight: 600, color: 'text.secondary' }}>{tr('Real:', '实际：')}</Typography>
           {realSegments.map((segment) => (
             <Box key={segment.key} sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
               <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: segment.color }} />
@@ -1494,7 +1509,7 @@ function TimingWaterfall({ timing }: { timing: RequestTiming }) {
         </Box>
         {injectedSum > 0 && (
           <Box data-testid="timing-legend-injected" sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
-            <Typography variant="caption" sx={{ fontSize: '0.55rem', fontWeight: 600, color: 'text.secondary' }}>Injected by MockServer:</Typography>
+            <Typography variant="caption" sx={{ fontSize: '0.55rem', fontWeight: 600, color: 'text.secondary' }}>{tr('Injected by MockServer:', '由 MockServer 注入：')}</Typography>
             {injectedSegments.filter((s) => s.ms > 0).map((segment) => (
               <Box key={segment.key} sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
                 <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: segment.color }} />
@@ -1520,6 +1535,7 @@ interface ReplayDialogProps {
 }
 
 function ReplayDialog({ open, onClose, item, connectionParams }: ReplayDialogProps) {
+  const { tr } = useI18n();
   const [loading, setLoading] = useState(false);
   const [replayResponse, setReplayResponse] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<HumanError | null>(null);
@@ -1546,7 +1562,7 @@ function ReplayDialog({ open, onClose, item, connectionParams }: ReplayDialogPro
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
-      <DialogTitle sx={{ fontSize: '0.95rem' }}>Replay Request</DialogTitle>
+      <DialogTitle sx={{ fontSize: '0.95rem' }}>{tr('Replay Request', '重放请求')}</DialogTitle>
       <DialogContent dividers>
         {!replayResponse && !error && !loading && (() => {
           const httpRequest = (item.value['httpRequest'] as Record<string, unknown> | undefined) ?? {};
@@ -1555,9 +1571,18 @@ function ReplayDialog({ open, onClose, item, connectionParams }: ReplayDialogPro
           return (
             <>
               <Alert severity="warning" sx={{ mb: 1 }}>
-                This will make a real outbound HTTP request to the original upstream target.
-                {isNonGet && ` The method is ${method}, which may mutate state or incur costs (e.g. LLM API charges).`}
-                {!isNonGet && ' It may incur costs if the target is a paid API (e.g. LLM provider).'}
+                {tr(
+                  'This will make a real outbound HTTP request to the original upstream target.',
+                  '这将向原始上游目标发出真实的 HTTP 请求。',
+                )}
+                {isNonGet && tr(
+                  ` The method is ${method}, which may mutate state or incur costs (e.g. LLM API charges).`,
+                  ` 请求方法为 ${method}，可能会修改状态或产生费用（例如 LLM API 费用）。`,
+                )}
+                {!isNonGet && tr(
+                  ' It may incur costs if the target is a paid API (e.g. LLM provider).',
+                  ' 如果目标是付费 API（例如 LLM 提供商），可能会产生费用。',
+                )}
               </Alert>
             </>
           );
@@ -1565,21 +1590,21 @@ function ReplayDialog({ open, onClose, item, connectionParams }: ReplayDialogPro
         {loading && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 2 }}>
             <CircularProgress size={20} />
-            <Typography variant="body2">Sending request...</Typography>
+            <Typography variant="body2">{tr('Sending request...', '正在发送请求...')}</Typography>
           </Box>
         )}
         {error && <HumanErrorAlert error={error} sx={{ mb: 1 }} />}
         {replayResponse && (
           <Box sx={{ mt: 1 }}>
             <Typography variant="subtitle2" sx={{ mb: 0.5, fontWeight: 600 }}>
-              Upstream Response
+              {tr('Upstream Response', '上游响应')}
             </Typography>
             <JsonViewer data={replayResponse} collapsed={3} />
           </Box>
         )}
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose} size="small">Close</Button>
+        <Button onClick={onClose} size="small">{tr('Close', '关闭')}</Button>
         <Button
           onClick={handleReplay}
           disabled={loading}
@@ -1587,7 +1612,7 @@ function ReplayDialog({ open, onClose, item, connectionParams }: ReplayDialogPro
           size="small"
           startIcon={<ReplayIcon sx={{ fontSize: '0.875rem' }} />}
         >
-          {replayResponse ? 'Replay Again' : 'Replay'}
+          {replayResponse ? tr('Replay Again', '再次重放') : tr('Replay', '重放')}
         </Button>
       </DialogActions>
     </Dialog>
@@ -1732,6 +1757,7 @@ function StructuredRequestPanel({ value, truncated, onLoadFull }: {
   truncated?: TruncatedBody;
   onLoadFull?: () => Promise<void>;
 }) {
+  const { tr } = useI18n();
   const req =
     value['httpRequest'] && typeof value['httpRequest'] === 'object' && !Array.isArray(value['httpRequest'])
       ? (value['httpRequest'] as Record<string, unknown>)
@@ -1739,7 +1765,7 @@ function StructuredRequestPanel({ value, truncated, onLoadFull }: {
   if (!req) {
     return (
       <Typography variant="body2" color="text.secondary">
-        No request captured.
+        {tr('No request captured.', '未捕获到请求。')}
       </Typography>
     );
   }
@@ -1756,11 +1782,11 @@ function StructuredRequestPanel({ value, truncated, onLoadFull }: {
           {path}
         </Typography>
       </Box>
-      <SectionLabel>Query Parameters</SectionLabel>
-      <KeyValueTable pairs={queryPairs} emptyLabel="No query parameters" />
-      <SectionLabel>Headers</SectionLabel>
-      <KeyValueTable pairs={headerPairs(req['headers'])} emptyLabel="No headers" />
-      <SectionLabel>Body</SectionLabel>
+      <SectionLabel>{tr('Query Parameters', '查询参数')}</SectionLabel>
+      <KeyValueTable pairs={queryPairs} emptyLabel={tr('No query parameters', '无查询参数')} />
+      <SectionLabel>{tr('Headers', '请求头')}</SectionLabel>
+      <KeyValueTable pairs={headerPairs(req['headers'])} emptyLabel={tr('No headers', '无请求头')} />
+      <SectionLabel>{tr('Body', '请求体')}</SectionLabel>
       {truncated && <TruncatedBodyNotice marker={truncated} onLoad={onLoadFull} />}
       <BodyView body={req['body']} />
     </Box>
@@ -1773,6 +1799,7 @@ function StructuredResponsePanel({ value, truncated, onLoadFull }: {
   truncated?: TruncatedBody;
   onLoadFull?: () => Promise<void>;
 }) {
+  const { tr } = useI18n();
   const res =
     value['httpResponse'] && typeof value['httpResponse'] === 'object' && !Array.isArray(value['httpResponse'])
       ? (value['httpResponse'] as Record<string, unknown>)
@@ -1780,7 +1807,7 @@ function StructuredResponsePanel({ value, truncated, onLoadFull }: {
   if (!res) {
     return (
       <Typography variant="body2" color="text.secondary">
-        No response captured for this request.
+        {tr('No response captured for this request.', '此请求没有捕获到响应。')}
       </Typography>
     );
   }
@@ -1796,9 +1823,9 @@ function StructuredResponsePanel({ value, truncated, onLoadFull }: {
           </Typography>
         )}
       </Box>
-      <SectionLabel>Headers</SectionLabel>
-      <KeyValueTable pairs={headerPairs(res['headers'])} emptyLabel="No headers" />
-      <SectionLabel>Body</SectionLabel>
+      <SectionLabel>{tr('Headers', '响应头')}</SectionLabel>
+      <KeyValueTable pairs={headerPairs(res['headers'])} emptyLabel={tr('No headers', '无响应头')} />
+      <SectionLabel>{tr('Body', '响应体')}</SectionLabel>
       {truncated && <TruncatedBodyNotice marker={truncated} onLoad={onLoadFull} />}
       <BodyView body={res['body']} />
     </Box>
@@ -2255,6 +2282,7 @@ function requestJsonForDiff(value: Record<string, unknown>): string {
 // ---------------------------------------------------------------------------
 
 export default function TrafficInspector() {
+  const { tr } = useI18n();
   // Show every captured request, regardless of whether it was proxied through to
   // a real upstream or matched a registered mock expectation. The MockServer
   // backend logs the two cases into separate arrays (proxiedRequests vs
@@ -2794,7 +2822,7 @@ export default function TrafficInspector() {
           }}
         >
           <Typography variant="subtitle2" sx={{ fontWeight: 600, fontSize: '0.79rem' }}>
-            Traffic
+            {tr('Traffic', '流量')}
           </Typography>
           {/* No row count: the list is the server's capped live window, so a count
               pins at the cap however much traffic ran. */}
@@ -2804,7 +2832,7 @@ export default function TrafficInspector() {
               back to the newest rows and resumes following (the tail-pin effect
               runs on the next render). */}
           <Chip
-            label={follow ? 'Following' : 'Follow'}
+            label={follow ? tr('Following', '正在跟随') : tr('Follow', '跟随')}
             size="small"
             color={follow ? 'primary' : 'default'}
             variant={follow ? 'filled' : 'outlined'}
@@ -2812,17 +2840,17 @@ export default function TrafficInspector() {
             onClick={() => setFollow((prev) => !prev)}
             title={
               follow
-                ? 'Following the newest requests. Scroll up to stop and read — nothing will move.'
-                : 'Paused while you read. Click to jump to the newest requests and resume following.'
+                ? tr('Following the newest requests. Scroll up to stop and read — nothing will move.', '正在跟随最新请求。向上滚动即可暂停并阅读，内容不会移动。')
+                : tr('Paused while you read. Click to jump to the newest requests and resume following.', '已暂停以便阅读。点击可跳到最新请求并继续跟随。')
             }
             sx={{ height: 18, fontSize: '0.65rem', '& .MuiChip-label': { px: 0.75 } }}
           />
           {unmatchedCount > 0 && (
-            <Tooltip title="Show why these requests didn't match any expectation">
+            <Tooltip title={tr("Show why these requests didn't match any expectation", '查看这些请求未匹配任何期望的原因')}>
               <Chip
                 // No number: unmatchedCount is over the capped live window, not over
                 // captured traffic, so it silently becomes the cap rather than a count.
-                label="unmatched"
+                label={tr('unmatched', '未匹配')}
                 color="warning"
                 size="small"
                 onClick={() => setExplainOpen(true)}
@@ -2836,17 +2864,17 @@ export default function TrafficInspector() {
             onChange={setTrafficSearch}
             maxWidth={200}
           />
-          <Tooltip title="Pick two requests to diff field-by-field">
+          <Tooltip title={tr('Pick two requests to diff field-by-field', '选择两个请求并逐字段比较')}>
             <ToggleButton
               value="compare"
               size="small"
               selected={compareMode}
               onChange={toggleCompareMode}
-              aria-label="Compare requests"
+              aria-label={tr('Compare requests', '比较请求')}
               sx={{ height: 28, px: 1, fontSize: '0.7rem', textTransform: 'none', flexShrink: 0 }}
             >
               <CompareArrowsIcon sx={{ fontSize: '0.95rem', mr: 0.5 }} />
-              Compare
+              {tr('Compare', '比较')}
             </ToggleButton>
           </Tooltip>
           {compareMode && (
@@ -2857,45 +2885,45 @@ export default function TrafficInspector() {
               onClick={() => { void openCompareDiff(); }}
               sx={{ height: 28, px: 1, fontSize: '0.7rem', textTransform: 'none', flexShrink: 0 }}
             >
-              Diff ({validCompareKeys.length}/2)
+              {tr(`Diff (${validCompareKeys.length}/2)`, `差异 (${validCompareKeys.length}/2)`) }
             </Button>
           )}
           {diffPool.length > 0 && (
-            <Tooltip title="Requests staged for comparison — pick any two to diff">
+            <Tooltip title={tr('Requests staged for comparison — pick any two to diff', '待比较的请求：任选两个查看差异')}>
               <Chip
                 icon={<LibraryAddCheckIcon sx={{ fontSize: '0.9rem' }} />}
-                label={`Diff Pool (${diffPool.length})`}
+                label={tr(`Diff Pool (${diffPool.length})`, `差异池 (${diffPool.length})`)}
                 color="secondary"
                 size="small"
                 onClick={(e) => setPoolAnchorEl(e.currentTarget)}
-                aria-label={`Diff Pool (${diffPool.length})`}
+                aria-label={tr(`Diff Pool (${diffPool.length})`, `差异池 (${diffPool.length})`)}
                 sx={{ height: 22, fontSize: '0.65rem', cursor: 'pointer', flexShrink: 0, '& .MuiChip-label': { px: 0.75 } }}
               />
             </Tooltip>
           )}
-          <Tooltip title="Select multiple requests to clear at once">
+          <Tooltip title={tr('Select multiple requests to clear at once', '选择多个请求并一次清除')}>
             <ToggleButton
               value="select"
               size="small"
               selected={selectMode}
               onChange={toggleSelectMode}
-              aria-label="Select requests"
+              aria-label={tr('Select requests', '选择请求')}
               sx={{ height: 28, px: 1, fontSize: '0.7rem', textTransform: 'none', flexShrink: 0 }}
             >
               <ChecklistIcon sx={{ fontSize: '0.95rem', mr: 0.5 }} />
-              Select
+              {tr('Select', '选择')}
             </ToggleButton>
           </Tooltip>
           {selectMode && (
             <>
-              <Tooltip title="Select all / none">
+              <Tooltip title={tr('Select all / none', '全选/全不选')}>
                 <Checkbox
                   size="small"
                   checked={allSelected}
                   indeterminate={someSelected}
                   disabled={filteredKeys.length === 0}
                   onChange={toggleSelectAll}
-                  slotProps={{ input: { 'aria-label': 'Select all requests' } }}
+                  slotProps={{ input: { 'aria-label': tr('Select all requests', '选择所有请求') } }}
                   sx={{ p: 0.25, flexShrink: 0 }}
                 />
               </Tooltip>
@@ -2908,7 +2936,7 @@ export default function TrafficInspector() {
                 onClick={() => setBulkClearConfirm(true)}
                 sx={{ height: 28, px: 1, fontSize: '0.7rem', textTransform: 'none', flexShrink: 0 }}
               >
-                Clear ({validSelectedKeys.length})
+                {tr(`Clear (${validSelectedKeys.length})`, `清除 (${validSelectedKeys.length})`)}
               </Button>
             </>
           )}
@@ -2916,8 +2944,8 @@ export default function TrafficInspector() {
           <Tooltip
             title={
               promotableCount > 0
-                ? 'Turn recorded (proxied) traffic into active mock expectations'
-                : 'Proxy some traffic through MockServer first — recorded requests can then be promoted to mocks'
+                ? tr('Turn recorded (proxied) traffic into active mock expectations', '将已记录的代理流量转换为活动模拟期望')
+                : tr('Proxy some traffic through MockServer first — recorded requests can then be promoted to mocks', '请先通过 MockServer 代理一些流量，之后可将已记录的请求转换为模拟规则')
             }
           >
             <span>
@@ -2932,8 +2960,8 @@ export default function TrafficInspector() {
                 {/* The full label wraps to two lines when the master/detail split squeezes
                     the list pane, so collapse to a short label below the container breakpoint
                     (the header Box has containerType: 'inline-size'). */}
-                <Box component="span" sx={{ display: 'inline', '@container (max-width: 720px)': { display: 'none' } }}>Promote to Mocks</Box>
-                <Box component="span" sx={{ display: 'none', '@container (max-width: 720px)': { display: 'inline' } }}>Mocks</Box>
+                <Box component="span" sx={{ display: 'inline', '@container (max-width: 720px)': { display: 'none' } }}>{tr('Promote to Mocks', '转换为模拟规则')}</Box>
+                <Box component="span" sx={{ display: 'none', '@container (max-width: 720px)': { display: 'inline' } }}>{tr('Mocks', '模拟')}</Box>
               </Button>
             </span>
           </Tooltip>
@@ -2945,9 +2973,10 @@ export default function TrafficInspector() {
             onClose={() => setLogLevelHintDismissed(true)}
             sx={{ mx: 1, my: 0.5, py: 0, fontSize: '0.75rem' }}
           >
-            MockServer is logging at {String(logLevel)}, so it does not record the response to a request
-            that matches no expectation. Those requests show no status here, and the unmatched badge, Why
-            Didn&apos;t This Match? and Generate Stub need the log level INFO (set it in Configuration).
+            {tr(
+              `MockServer is logging at ${String(logLevel)}, so it does not record the response to a request that matches no expectation. Those requests show no status here, and the unmatched badge, Why Didn't This Match? and Generate Stub need the log level INFO (set it in Configuration).`,
+              `MockServer 当前日志级别为 ${String(logLevel)}，因此不会记录未匹配任何期望的请求响应。这些请求在此处不显示状态；“未匹配”标记、“为什么没有匹配？”和“生成存根”需要将日志级别设为 INFO（可在配置中设置）。`,
+            )}
           </Alert>
         )}
         {trafficSearch && shortenedRows.length > 0 && (
@@ -2956,12 +2985,14 @@ export default function TrafficInspector() {
             sx={{ mx: 1, my: 0.5, py: 0, fontSize: '0.75rem' }}
             action={(
               <Button size="small" color="inherit" disabled={searchingFull} onClick={() => { void searchFullBodies(); }}>
-                {searchingFull ? 'Loading…' : 'Search Full Bodies'}
+                {searchingFull ? tr('Loading…', '正在加载…') : tr('Search Full Bodies', '搜索完整正文')}
               </Button>
             )}
           >
-            {shortenedRows.length === 1 ? '1 request has' : `${shortenedRows.length} requests have`} a body
-            longer than shown; the search covers only the part shown.
+            {tr(
+              `${shortenedRows.length === 1 ? '1 request has' : `${shortenedRows.length} requests have`} a body longer than shown; the search covers only the part shown.`,
+              `${shortenedRows.length} 个请求的正文长度超过当前显示范围；搜索仅覆盖已显示的部分。`,
+            )}
           </Alert>
         )}
         {/* Only worth the vertical space once the traffic actually spans more
@@ -2981,9 +3012,9 @@ export default function TrafficInspector() {
           {filtered.length === 0 ? (
             allRequests.length === 0 ? (
               <Box sx={{ p: 2, textAlign: 'center', color: 'text.secondary' }}>
-                <Typography variant="body2" sx={{ mb: 1 }}>No traffic captured yet.</Typography>
+                <Typography variant="body2" sx={{ mb: 1 }}>{tr('No traffic captured yet.', '尚未捕获流量。')}</Typography>
                 <Typography variant="caption" component="div" sx={{ mb: 1 }}>
-                  Send a request through MockServer — as a proxy or to a mock — and it appears here. For example:
+                  {tr('Send a request through MockServer — as a proxy or to a mock — and it appears here. For example:', '通过 MockServer 发送请求（作为代理或访问模拟规则），请求就会显示在这里。例如：')}
                 </Typography>
                 <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, maxWidth: '100%' }}>
                   <Box
@@ -3005,12 +3036,12 @@ export default function TrafficInspector() {
                   <CopyButton text={`curl -x http://${connectionParams.host}:${connectionParams.port} http://example.com`} />
                 </Box>
                 <Typography variant="caption" component="div" sx={{ mt: 1 }}>
-                  New to proxying? See the Get Started tab for proxy setup.
+                  {tr('New to proxying? See the Get Started tab for proxy setup.', '初次使用代理？请在“开始使用”选项卡中查看代理设置。')}
                 </Typography>
               </Box>
             ) : (
               <Typography variant="body2" color="text.secondary" sx={{ p: 2, textAlign: 'center' }}>
-                No matching requests
+                {tr('No matching requests', '没有匹配的请求')}
               </Typography>
             )
           ) : (
@@ -3182,7 +3213,7 @@ export default function TrafficInspector() {
       >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1.5, py: 1, borderBottom: 1, borderColor: 'divider' }}>
           <Typography variant="subtitle2" sx={{ fontWeight: 700, flexGrow: 1 }}>
-            Diff Pool ({diffPool.length})
+            {tr(`Diff Pool (${diffPool.length})`, `差异池 (${diffPool.length})`)}
           </Typography>
           <Button
             size="small"
@@ -3191,13 +3222,13 @@ export default function TrafficInspector() {
             disabled={diffPool.length === 0}
             sx={{ fontSize: '0.7rem', textTransform: 'none' }}
           >
-            Clear All
+            {tr('Clear All', '全部清除')}
           </Button>
         </Box>
         <Box sx={{ maxHeight: 320, overflowY: 'auto' }}>
           {diffPool.length === 0 ? (
             <Typography variant="body2" color="text.secondary" sx={{ p: 2, textAlign: 'center' }}>
-              No requests staged. Use “Add to Diff Pool” in the detail pane.
+              {tr('No requests staged. Use “Add to Diff Pool” in the detail pane.', '尚未暂存请求。请在详情窗格中使用“添加到差异池”。')}
             </Typography>
           ) : (
             diffPool.map((entry) => {
@@ -3212,7 +3243,7 @@ export default function TrafficInspector() {
                     checked={picked}
                     disabled={!picked && poolPicks.length >= 2}
                     onChange={() => togglePoolPick(entry.key)}
-                    slotProps={{ input: { 'aria-label': `Pick ${entry.method ?? ''} ${entry.path ?? entry.key}` } }}
+                    slotProps={{ input: { 'aria-label': tr(`Pick ${entry.method ?? ''} ${entry.path ?? entry.key}`, `选择 ${entry.method ?? ''} ${entry.path ?? entry.key}`) } }}
                     sx={{ p: 0.25, flexShrink: 0 }}
                   />
                   <Typography variant="caption" sx={{ fontWeight: 700, flexShrink: 0, minWidth: 40 }}>
@@ -3233,11 +3264,11 @@ export default function TrafficInspector() {
                       sx={{ height: 18, fontSize: '0.6rem', flexShrink: 0, '& .MuiChip-label': { px: 0.6 } }}
                     />
                   )}
-                  <Tooltip title="Remove from Diff Pool">
+                  <Tooltip title={tr('Remove from Diff Pool', '从差异池中移除')}>
                     <IconButton
                       size="small"
                       onClick={() => removeFromDiffPool(entry.key)}
-                      aria-label={`Remove ${entry.method ?? ''} ${entry.path ?? entry.key} from Diff Pool`}
+                      aria-label={tr(`Remove ${entry.method ?? ''} ${entry.path ?? entry.key} from Diff Pool`, `从差异池中移除 ${entry.method ?? ''} ${entry.path ?? entry.key}`)}
                       sx={{ p: 0.25, flexShrink: 0 }}
                     >
                       <CloseIcon sx={{ fontSize: '0.9rem' }} />
@@ -3250,7 +3281,7 @@ export default function TrafficInspector() {
         </Box>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1.5, py: 1, borderTop: 1, borderColor: 'divider' }}>
           <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1 }}>
-            {poolPicks.length}/2 picked
+            {tr(`${poolPicks.length}/2 picked`, `已选择 ${poolPicks.length}/2`)}
           </Typography>
           <Button
             size="small"
@@ -3259,7 +3290,7 @@ export default function TrafficInspector() {
             onClick={openPoolDiff}
             sx={{ fontSize: '0.7rem', textTransform: 'none' }}
           >
-            Diff Selected
+            {tr('Diff Selected', '比较所选请求')}
           </Button>
         </Box>
       </Popover>
@@ -3301,9 +3332,15 @@ export default function TrafficInspector() {
 
       <ConfirmDialog
         open={bulkClearConfirm}
-        title={`Clear ${validSelectedKeys.length} request${validSelectedKeys.length === 1 ? '' : 's'}?`}
-        message={`Remove the ${validSelectedKeys.length} selected request${validSelectedKeys.length === 1 ? '' : 's'} from the log. Identical requests captured alongside them may also be cleared. Expectations are kept. This cannot be undone.`}
-        confirmLabel="Clear selected"
+        title={tr(
+          `Clear ${validSelectedKeys.length} request${validSelectedKeys.length === 1 ? '' : 's'}?`,
+          `清除 ${validSelectedKeys.length} 个请求？`,
+        )}
+        message={tr(
+          `Remove the ${validSelectedKeys.length} selected request${validSelectedKeys.length === 1 ? '' : 's'} from the log. Identical requests captured alongside them may also be cleared. Expectations are kept. This cannot be undone.`,
+          `从日志中移除选中的 ${validSelectedKeys.length} 个请求。同时捕获的相同请求也可能被清除；期望规则会保留。此操作无法撤销。`,
+        )}
+        confirmLabel={tr('Clear selected', '清除所选请求')}
         onConfirm={() => { void handleBulkClear(); }}
         onClose={() => setBulkClearConfirm(false)}
       />
