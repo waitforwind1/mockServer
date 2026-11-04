@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="MockServer local (1081)" type="Application" factoryName="Application">
+    <option name="MAIN_CLASS_NAME" value="org.mockserver.cli.Main" />
+    <module name="mockserver-netty" />
+    <option name="PROGRAM_PARAMETERS" value="-serverPort 1081 -logLevel INFO" />
+    <option name="ALTERNATIVE_JRE_PATH" value="corretto-17" />
+    <option name="ALTERNATIVE_JRE_PATH_ENABLED" value="true" />
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

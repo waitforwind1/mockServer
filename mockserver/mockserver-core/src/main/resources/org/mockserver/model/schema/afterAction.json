@@ -1,0 +1,37 @@
+{
+  "title": "afterAction",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "httpRequest": {
+      "$ref": "#/definitions/httpRequest"
+    },
+    "httpRequestTemplate": {
+      "$ref": "#/definitions/httpTemplate"
+    },
+    "httpClassCallback": {
+      "$ref": "#/definitions/httpClassCallback"
+    },
+    "httpObjectCallback": {
+      "$ref": "#/definitions/httpObjectCallback"
+    },
+    "delay": {
+      "$ref": "#/definitions/delay"
+    },
+    "blocking": {
+      "type": "boolean"
+    },
+    "timeout": {
+      "$ref": "#/definitions/delay"
+    },
+    "failurePolicy": {
+      "enum": [ "FAIL_FAST", "BEST_EFFORT" ]
+    }
+  },
+  "oneOf": [
+    { "required": ["httpRequest"] },
+    { "required": ["httpRequestTemplate"] },
+    { "required": ["httpClassCallback"] },
+    { "required": ["httpObjectCallback"] }
+  ]
+}

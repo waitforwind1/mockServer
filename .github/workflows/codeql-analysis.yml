@@ -1,0 +1,83 @@
+# For most projects, this workflow file will not need changing; you simply need
+# to commit it to your repository.
+#
+# You may wish to alter this file to override the set of languages analyzed,
+# or to provide custom queries or build logic.
+name: "CodeQL"
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: '0 22 * * 2'
+
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # upload results to code scanning
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # go has no `none` build mode; java is built by the Maven step below.
+        include:
+          - language: actions
+            build-mode: none
+          - language: csharp
+            build-mode: none
+          - language: go
+            build-mode: autobuild
+          - language: java
+            build-mode: manual
+          - language: javascript
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: ruby
+            build-mode: none
+          - language: rust
+            build-mode: none
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up JDK 17
+      if: matrix.language == 'java'
+      uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad  # v6.1.0
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370  # v4.39.1
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: ${{ matrix.build-mode }}
+        queries: security-extended
+
+    - name: Build with Maven
+      if: matrix.language == 'java'
+      working-directory: mockserver
+      # 'package' (not 'compile') fully builds the reactor including the
+      # *-no-dependencies shaded jars, whose classes only exist after the
+      # maven-shade-plugin runs in the package phase. CodeQL scans the reactor;
+      # mockserver-examples is no longer part of it (moved to the standalone
+      # examples/java, built in Buildkite) so it is not analysed here.
+      run: ./mvnw -B clean package -DskipTests -Dmaven.javadoc.skip=true
+      env:
+        MAVEN_OPTS: -Xmx2048m
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370  # v4.39.1
+      with:
+        category: ".github/workflows/codeql-analysis.yml:analyze/language:${{ matrix.language }}"

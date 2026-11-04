@@ -1,0 +1,25 @@
+{
+  "title": "request definition",
+  "anyOf": [
+    {
+      "$ref": "#/definitions/httpRequest"
+    },
+    {
+      "$ref": "#/definitions/openAPIDefinition"
+    },
+    {
+      "$ref": "#/definitions/binaryRequestDefinition"
+    },
+    {
+      "$ref": "#/definitions/dnsRequestDefinition"
+    },
+    {
+      "$ref": "#/definitions/conditionalRequestDefinition"
+    },
+    {
+      "$ref": "#/definitions/anyOfRequestDefinition"
+    }
+  ],
+  "definitions": {
+  }
+}

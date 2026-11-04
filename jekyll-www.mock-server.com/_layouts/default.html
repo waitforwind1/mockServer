@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:og="https://ogp.me/ns#" prefix="og: http://ogp.me/ns#">
+
+	{% include head.html %}
+
+	<body onload="scrollActiveMenuItemIntoView()">
+
+		<div id="layout">
+
+			{% include header.html %}
+
+			<div id="main">
+				<div class="content" itemscope itemtype="https://schema.org/Article">
+
+					{{ content }}
+
+					{% include footer.html %}
+				</div>
+			</div>
+
+		</div>
+
+
+	</body>
+
+</html>

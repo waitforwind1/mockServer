@@ -1,0 +1,10 @@
+version: "2.4"
+services:
+  mockServer:
+    image: mockserver/mockserver:mockserver-9.2.0
+    ports:
+      - 1080:1090
+    environment:
+      MOCKSERVER_LOG_LEVEL: TRACE
+      MOCKSERVER_MAX_EXPECTATIONS: 100
+      MOCKSERVER_MAX_HEADER_SIZE: 8192

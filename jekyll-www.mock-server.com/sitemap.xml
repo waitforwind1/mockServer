@@ -1,0 +1,67 @@
+---
+layout: null
+sitemap:
+  exclude: true
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.sitemaps.org/schemas/sitemap/0.9 http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd">
+{%- assign sitemap_excludes = "/css/main.scss,/error403.html,/google2b19680b073ab17b.html,/feed.xml,/sitemap.html,/llms.txt,/llms-full.txt,/ai.txt,/robots.txt,/mockserver-openapi.yaml,/contributing.html" | split: "," -%}
+{%- for page in site.pages -%}
+{%- if page.sitemap.exclude -%}{%- continue -%}{%- endif -%}
+{%- if sitemap_excludes contains page.url -%}{%- continue -%}{%- endif -%}
+{%- assign extn = page.url | split: '.' | last -%}
+{%- unless page.url == '/' or extn == 'html' -%}{%- continue -%}{%- endunless %}
+  <url>
+    <loc>{{ page.url | replace:'index.html','' | replace:'.html','.html' | prepend: site.baseurl | prepend: site.url }}</loc>
+    {%- if page.sitemap.lastmod %}
+    <lastmod>{{ page.sitemap.lastmod | date_to_xmlschema }}</lastmod>
+    {%- elsif page.last_modified_at %}
+    <lastmod>{{ page.last_modified_at | date_to_xmlschema }}</lastmod>
+    {%- else %}
+    <lastmod>{{ site.time | date_to_xmlschema }}</lastmod>
+    {%- endif %}
+    {%- if page.sitemap.changefreq %}
+    <changefreq>{{ page.sitemap.changefreq }}</changefreq>
+    {%- endif %}
+    {%- if page.sitemap.priority %}
+    <priority>{{ page.sitemap.priority }}</priority>
+    {%- elsif page.url == '/' %}
+    <priority>1.0</priority>
+    {%- elsif page.section == 'Getting Started' or page.section == 'Creating Mocks' %}
+    <priority>0.8</priority>
+    {%- elsif page.section == 'Data & State' or page.section == 'Verify & Test' or page.section == 'Protocols & Advanced' or page.section == 'AI Integration' or page.section == 'Chaos Testing' or page.section == 'Proxy' %}
+    <priority>0.7</priority>
+    {%- elsif page.section == 'Security' or page.section == 'Operations' or page.section == 'Where' %}
+    <priority>0.6</priority>
+    {%- else %}
+    <priority>0.5</priority>
+    {%- endif %}
+  </url>
+{%- endfor %}
+  <url>
+    <loc>{{ site.url }}/llms.txt</loc>
+    <lastmod>{{ site.time | date_to_xmlschema }}</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>{{ site.url }}/llms-full.txt</loc>
+    <lastmod>{{ site.time | date_to_xmlschema }}</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>{{ site.url }}/ai.txt</loc>
+    <lastmod>{{ site.time | date_to_xmlschema }}</lastmod>
+    <changefreq>yearly</changefreq>
+    <priority>0.3</priority>
+  </url>
+  <url>
+    <loc>{{ site.url }}/contributing.html</loc>
+    <lastmod>{{ site.time | date_to_xmlschema }}</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.4</priority>
+  </url>
+</urlset>

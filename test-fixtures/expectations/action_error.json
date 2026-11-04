@@ -1,0 +1,15 @@
+{
+  "httpRequest": {
+    "path": "/err"
+  },
+  "httpError": {
+    "responseBytes": "SGVsbG8gV29ybGQh",
+    "delay": {
+      "timeUnit": "MILLISECONDS",
+      "value": 20
+    },
+    "dropConnection": false,
+    "resetConnection": false,
+    "primary": true
+  }
+}

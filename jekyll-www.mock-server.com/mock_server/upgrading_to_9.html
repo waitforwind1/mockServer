@@ -1,0 +1,678 @@
+---
+title: Upgrading to MockServer 9.0.0
+description: Every breaking change in MockServer 9.0.0 — who is affected and what to change, grouped by configuration, Docker/Helm, binary proxying, initialisation files, verification, and each client library.
+shortTitle: Upgrading to 9.0.0
+layout: page
+pageOrder: 3
+section: 'Operations'
+subsection: true
+sitemap:
+  priority: 0.8
+  changefreq: 'monthly'
+  lastmod: 2026-10-20T08:00:00+01:00
+---
+
+<p style="background-color: #f8f9fa; border-left: 4px solid #9c0000; padding: 12px; margin-bottom: 16px;">
+    <strong>Most of these changes need an action only if you use the specific feature or client they name.</strong> But five of them can affect a plain HTTP mock with no special configuration: a <span class="inline_code">statusCode</span> outside 100&ndash;999 is now rejected (no opt-out), an unexpected control-plane failure now answers <span class="inline_code">500</span> instead of <span class="inline_code">400</span>, an over-count verification failure's message wording changed, a repeated <span class="inline_code">id</span> in an initialisation file now keeps the last entry instead of the first, and <span class="inline_code">maxLoggedMatchFailures</span> now caps did-not-match log entries at 50 by default. Check the table below against what you use.
+</p>
+
+<p>MockServer 9.0.0 is a major release. Most of its breaking changes are opt-out, feature-gated, or fix a matcher that used to be silently ignored, but not all &mdash; see the callout above for the ones that can affect a plain HTTP mock. This page lists every <span class="inline_code">BREAKING</span> entry from the <a href="https://github.com/mock-server/mockserver-monorepo/blob/master/changelog.md" target="_blank" rel="noopener noreferrer">changelog</a>, including the Go client's module-path move, grouped by who it affects, with the exact property or code change to make. A further section below, <a href="#non_breaking_changes">Non-breaking changes that can still affect an unmodified setup</a>, covers changes the changelog does not mark <span class="inline_code">BREAKING</span> but that alter the behaviour of a server or client that sets nothing new.</p>
+
+<a id="who_needs_to_act" class="anchor" href="#who_needs_to_act">&nbsp;</a>
+
+<h2>Who needs to act</h2>
+
+<table class="table-scroll">
+    <thead>
+        <tr>
+            <th>Change</th>
+            <th>Who's affected</th>
+            <th>What to do</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr><td><a href="#browser_origins">Only trusted web pages can use MockServer's own API from a browser</a> (later 9.x)</td><td>Anyone whose browser page on another host, or dashboard pointed at another host or behind a <span class="inline_code">Host</span>-rewriting proxy, calls MockServer's API; anyone who set <span class="inline_code">corsAllowOrigin</span> so a page could call it</td><td>Set <span class="inline_code">controlPlaneCorsAllowOrigin</span> to that page's origin</td></tr>
+        <tr><td><a href="#block_private_networks_startup_only">forwardProxyBlockPrivateNetworks can only be set at startup</a> (later 9.x)</td><td>Anyone who turns <span class="inline_code">forwardProxyBlockPrivateNetworks</span> on or off with <span class="inline_code">PUT /mockserver/configuration</span> or a client's <span class="inline_code">updateConfiguration</span></td><td>Set it before the server starts (system property, environment variable, properties file or <span class="inline_code">Configuration</span>)</td></tr>
+        <tr><td><a href="#write_paths_startup_only">File paths MockServer writes to can only be set at startup</a> (later 9.x)</td><td>Anyone who changes <span class="inline_code">auditLogFile</span>, <span class="inline_code">persistedExpectationsPath</span>, <span class="inline_code">persistedRecordedExpectationsPath</span>, <span class="inline_code">persistedRecordedRequestsPath</span>, <span class="inline_code">memoryUsageCsvDirectory</span>, <span class="inline_code">directoryToSaveDynamicSSLCertificate</span> or <span class="inline_code">grpcProtocPath</span> with <span class="inline_code">PUT /mockserver/configuration</span> or a client's <span class="inline_code">updateConfiguration</span></td><td>Set them before the server starts (system property, environment variable, properties file or <span class="inline_code">Configuration</span>)</td></tr>
+        <tr><td><a href="#control_plane_trust_startup_only">Control-plane authentication, authorization, auditing and the dashboard analytics endpoint can only be set at startup</a> (later 9.x)</td><td>Anyone who changes the control-plane mTLS, JWT or OIDC settings, <span class="inline_code">controlPlaneAuthorizationEnabled</span>, <span class="inline_code">controlPlaneScopeMapping</span>, <span class="inline_code">controlPlaneAuditEnabled</span> or <span class="inline_code">dashboardAnalyticsEndpoint</span> with <span class="inline_code">PUT /mockserver/configuration</span>, a client's <span class="inline_code">updateConfiguration</span> or the dashboard's Audit Trail switch</td><td>Set them before the server starts (system property, environment variable, properties file or <span class="inline_code">Configuration</span>)</td></tr>
+        <tr><td><a href="#no_proxy_hosts_startup_only">noProxyHosts can only be set at startup</a> (later 9.x)</td><td>Anyone who changes <span class="inline_code">noProxyHosts</span> with <span class="inline_code">PUT /mockserver/configuration</span> or a client's <span class="inline_code">updateConfiguration</span></td><td>Set it before the server starts (system property, environment variable, properties file or <span class="inline_code">Configuration</span>)</td></tr>
+        <tr><td><a href="#llm_base_url_clears_key">Changing llmBaseUrl at runtime clears llmApiKey</a> (later 9.x)</td><td>Anyone who changes <span class="inline_code">llmBaseUrl</span> (or <span class="inline_code">llmProvider</span> with no <span class="inline_code">llmBaseUrl</span>) with <span class="inline_code">PUT /mockserver/configuration</span> and relies on the key set earlier</td><td>Send <span class="inline_code">llmApiKey</span> in the same request as the new endpoint</td></tr>
+        <tr><td><a href="#fan_in_peers_startup_only">Cluster fan-in peers and token can only be set at startup</a> (later 9.x)</td><td>Anyone who changes <span class="inline_code">clusterVerifyFanInPeers</span> or <span class="inline_code">clusterFanInPeerAuthToken</span> with <span class="inline_code">PUT /mockserver/configuration</span> or a client's <span class="inline_code">updateConfiguration</span></td><td>Set them before the server starts (system property, environment variable, properties file or <span class="inline_code">Configuration</span>)</td></tr>
+        <tr><td><a href="#war_mtls_enforced">A WAR enforces tlsMutualAuthenticationRequired on mocked requests</a> (later 9.x)</td><td>Anyone who deploys <span class="inline_code">mockserver-war</span> or <span class="inline_code">mockserver-proxy-war</span> with <span class="inline_code">tlsMutualAuthenticationRequired=true</span> (for example from a shared <span class="inline_code">mockserver.properties</span>)</td><td>Serve over HTTPS with the servlet container verifying client certificates, or unset <span class="inline_code">tlsMutualAuthenticationRequired</span></td></tr>
+        <tr><td><a href="#kafka_sasl_startup_only">Kafka SASL login and bootstrap servers can only be set at startup</a> (later 9.x)</td><td>Anyone who sends <span class="inline_code">kafkaSecurity.saslJaasConfig</span> to <span class="inline_code">PUT /mockserver/asyncapi</span>, sends a <span class="inline_code">SASL_PLAINTEXT</span>/<span class="inline_code">SASL_SSL</span> request naming brokers other than <span class="inline_code">asyncKafkaBootstrapServers</span>, or changes <span class="inline_code">asyncKafkaBootstrapServers</span> with <span class="inline_code">PUT /mockserver/configuration</span></td><td>Set <span class="inline_code">asyncKafkaSaslJaasConfig</span> and <span class="inline_code">asyncKafkaBootstrapServers</span> before the server starts, and leave <span class="inline_code">kafkaBootstrapServers</span> out of SASL requests</td></tr>
+        <tr><td><a href="#forward_unmatched_to_needs_mutate">retrieve with forwardUnmatchedTo needs a role that may change state</a> (later 9.x)</td><td>Anyone with <span class="inline_code">controlPlaneAuthorizationEnabled</span> whose read-only principal calls <span class="inline_code">retrieve</span> with <span class="inline_code">forwardUnmatchedTo</span></td><td>Grant that principal the <span class="inline_code">MUTATE</span> role, or arm recording with a principal that has it</td></tr>
+        <tr><td><a href="#templates_500">Failed template answers 500</a></td><td>Anyone using a response or forward template</td><td>Handle a <span class="inline_code">500</span> instead of a <span class="inline_code">404</span>/<span class="inline_code">502</span>, or set <span class="inline_code">templateFailureAsServerError=false</span></td></tr>
+        <tr><td><a href="#max_logged_match_failures">maxLoggedMatchFailures defaults to 50</a></td><td>Anyone with &gt;50 expectations who reads did-not-match log entries at <span class="inline_code">INFO</span></td><td>Set <span class="inline_code">maxLoggedMatchFailures=-1</span> to keep logging every comparison</td></tr>
+        <tr><td><a href="#init_duplicate_id">Init files: repeated id keeps the last entry</a></td><td>Anyone with a repeated <span class="inline_code">id</span> across expectations in an initialisation file</td><td>Remove the repeated ids, or reorder so the one you want is last</td></tr>
+        <tr><td><a href="#match_binary_expectations_when_proxying">Binary expectations now match while proxying</a></td><td>Anyone who proxies binary (non-HTTP) traffic <em>and</em> has binary expectations registered on the same MockServer</td><td>Set <span class="inline_code">matchBinaryExpectationsWhenProxying=false</span> to keep forwarding everything</td></tr>
+        <tr><td><a href="#binary_forwarder_removed">Binary forwarder removed; one upstream connection per client</a></td><td>Anyone who proxies a binary (non-HTTP) protocol</td><td>Remove <span class="inline_code">forwardBinaryRequestsWithoutWaitingForResponse</span>; verify your upstream proxy allows <span class="inline_code">CONNECT</span> to non-443 ports; drop any calls to the removed Java APIs</td></tr>
+        <tr><td><a href="#status_code_validation">Response statusCode must be 100&ndash;999</a></td><td>Anyone with an expectation or file whose <span class="inline_code">statusCode</span> is <span class="inline_code">0</span> or otherwise out of range</td><td>Fix the status code; invalid entries in files are skipped with a WARN, not fatal</td></tr>
+        <tr><td><a href="#http3_opt_in">HTTP/3 needs an opt-in jar/image and now refuses to start without it</a></td><td>Anyone who sets <span class="inline_code">http3Port</span></td><td>Use the <span class="inline_code">jar-with-dependencies-http3</span> jar; the standard Docker image includes the native library (from the release that fixed <a href="https://github.com/mock-server/mockserver-monorepo/issues/2869">#2869</a>; before that, the <span class="inline_code">-http3</span> Docker tag / Helm <span class="inline_code">image.variant=http3</span>)</td></tr>
+        <tr><td><a href="#dns_refuses_to_start">DNS mocking refuses to start if its port can't be used</a></td><td>Anyone who sets <span class="inline_code">dnsEnabled=true</span> with a fixed <span class="inline_code">dnsPort</span></td><td>Free the port, or leave <span class="inline_code">dnsPort=0</span> (default) so the OS picks one</td></tr>
+        <tr><td><a href="#control_plane_500">Unexpected control-plane failures answer 500, not 400</a></td><td>Code that treats any control-plane <span class="inline_code">400</span> as "my input was wrong", or catches the Java client's bare <span class="inline_code">IllegalArgumentException</span></td><td>Treat <span class="inline_code">500</span> as an internal MockServer fault (correlation id in the body and log); <span class="inline_code">400</span> still means your request was rejected</td></tr>
+        <tr><td><a href="#control_plane_mtls">Control-plane mTLS trusts only the configured CA chain</a></td><td>Anyone using <span class="inline_code">controlPlaneTLSMutualAuthenticationCAChain</span> with certificates signed by MockServer's own CA; also anyone with control-plane mTLS required, no chain set, and the bundled default CA &mdash; the server now refuses to start</td><td>Add MockServer's CA certificate to the chain (server and Java client each need this separately), or set <span class="inline_code">certificateAuthorityCertificate</span>/<span class="inline_code">certificateAuthorityPrivateKey</span> to give MockServer its own CA</td></tr>
+        <tr><td><a href="#mtls_bundled_ca">mTLS never trusts the bundled default CA</a> (later 9.x)</td><td>Anyone with <span class="inline_code">tlsMutualAuthenticationRequired</span> (or <span class="inline_code">tlsMutualAuthenticationCertificateChain</span>) while MockServer uses its default CA &mdash; the server now refuses to start, or stops accepting client certificates signed by the default CA</td><td>Give MockServer its own CA, set <span class="inline_code">dynamicallyCreateCertificateAuthorityCertificate=true</span>, or set <span class="inline_code">tlsMutualAuthenticationCertificateChain</span> to the CA that signs your client certificates; for a throwaway local test only, <span class="inline_code">tlsMutualAuthenticationAllowBundledCa=true</span></td></tr>
+        <tr><td><a href="#verification_wording">Over-count verification failures reword "not found" to "found"</a></td><td>Tests that assert the exact text of a <span class="inline_code">never()</span>/<span class="inline_code">atMost</span>/<span class="inline_code">exactly</span>/<span class="inline_code">between</span> failure message</td><td>Update the assertion to the new wording</td></tr>
+        <tr><td><a href="#response_body_verification">Response-body verification now applies the matcher</a></td><td>Response verifications using a regex/JSON path/JSON Schema/XPath/XML Schema/form/multipart/fuzzy/GraphQL/JSON-RPC/WASM/allOf matcher, or <span class="inline_code">matchType</span>/<span class="inline_code">not</span></td><td>Fix the matcher or the system under test &mdash; a verification that only passed because the matcher was ignored now fails</td></tr>
+        <tr><td><a href="#openapi_verification">OpenAPI request verification now counts only matching operations</a></td><td>Verifications using <span class="inline_code">verify(openAPI(...), ...)</span></td><td>Fix the matcher or the system under test if a verification now fails</td></tr>
+        <tr><td><a href="#asyncapi_verification">AsyncAPI verify rejects unknown/top-level count fields</a></td><td>Callers of <span class="inline_code">PUT /mockserver/asyncapi/verify</span> putting <span class="inline_code">atLeast</span>/<span class="inline_code">atMost</span>/<span class="inline_code">exactly</span> at the top level</td><td>Move them inside a <span class="inline_code">count</span> object</td></tr>
+        <tr><td><a href="#log_entries_format">LOG_ENTRIES bodies written once, not three times</a></td><td>Code reading a body from an entry's <span class="inline_code">message</span> or <span class="inline_code">arguments</span></td><td>Read the body from the entry's <span class="inline_code">httpRequest</span>/<span class="inline_code">httpResponse</span> instead</td></tr>
+        <tr><td><a href="#genai_span_names">GenAI trace spans renamed for Gemini and text completions</a></td><td>Traces, dashboards or alerts matching <span class="inline_code">gen_ai.operation.name == "chat"</span></td><td>Match <span class="inline_code">generate_content</span> (Gemini) or <span class="inline_code">text_completion</span> (legacy/FIM/Ollama/Bedrock prompt-string) too</td></tr>
+        <tr><td><a href="#node_llm_typings">Node client: <span class="inline_code">mockserver-client/llm</span> typings drop their default export</a></td><td>TypeScript users importing <span class="inline_code">mockserver-client/llm</span></td><td>Use the named export instead of the default</td></tr>
+        <tr><td><a href="#node_exports_map">Node client/launcher gain an <span class="inline_code">exports</span> map</a></td><td>Anyone deep-importing a path the map doesn't name (a <span class="inline_code">.d.ts</span> file, <span class="inline_code">test/</span>, <span class="inline_code">tasks/mockServer.js</span>)</td><td>Import the package itself or a listed path instead</td></tr>
+        <tr><td><a href="#node_retrieve_typing">Node client: recorded-request methods now typed as requests, not responses</a></td><td>TypeScript code typing results as <span class="inline_code">HttpResponse[]</span> or reading <span class="inline_code">.headers</span>/<span class="inline_code">.body</span>/<span class="inline_code">.cookies</span> directly</td><td>Narrow each result to <span class="inline_code">HttpRequest</span> first</td></tr>
+        <tr><td><a href="#rust_enums">Rust client enums are now <span class="inline_code">#[non_exhaustive]</span></a></td><td>Rust code with an exhaustive <span class="inline_code">match</span> on a client enum</td><td>Add a wildcard <span class="inline_code">_ =&gt;</span> arm</td></tr>
+        <tr><td><a href="#go_module_path">Go module path moves to <span class="inline_code">/v9</span></a></td><td>Go users of <span class="inline_code">mockserver-client-go</span> or <span class="inline_code">mockserver-testcontainers</span>'s Go module</td><td>Update the import path and run <span class="inline_code">go get .../v9</span></td></tr>
+    </tbody>
+</table>
+
+<a id="server_configuration" class="anchor" href="#server_configuration">&nbsp;</a>
+
+<h2>Server configuration</h2>
+
+<p>Three defaults change behaviour for an unmodified configuration, each with an opt-out property (<span class="inline_code">templateFailureAsServerError</span>, <span class="inline_code">maxLoggedMatchFailures</span>, <span class="inline_code">matchBinaryExpectationsWhenProxying</span>), plus stricter <span class="inline_code">statusCode</span> validation, which has no opt-out.</p>
+
+<a id="templates_500" class="anchor" href="#templates_500">&nbsp;</a>
+
+<h3>A response or forward template that fails now answers 500, not 404</h3>
+
+<p><span class="inline_code">templateFailureAsServerError</span> is now <span class="inline_code">true</span> by default. A response or forward template that throws, fails to parse, times out, or renders output that isn't a valid response or request now answers <span class="inline_code">500</span> with an <span class="inline_code">x-mockserver-template-error: true</span> header and the template error as the body, instead of the <span class="inline_code">404</span> (or <span class="inline_code">502</span> for a forward template) it answered in 8.0.0. The error is still logged as before.</p>
+
+<p><strong>To keep the 8.0.0 behaviour:</strong></p>
+
+<pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.templateFailureAsServerError=false</code></pre>
+<p>or</p>
+<pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_TEMPLATE_FAILURE_AS_SERVER_ERROR=false</code></pre>
+
+<p>See <a href="/mock_server/configuration_properties.html#button_configuration_template_failure_as_server_error">Configuration &ndash; Answer a failed template with a 500</a>.</p>
+
+<a id="max_logged_match_failures" class="anchor" href="#max_logged_match_failures">&nbsp;</a>
+
+<h3>maxLoggedMatchFailures now defaults to 50</h3>
+
+<p>At <span class="inline_code">INFO</span>, a request compared against more than 50 expectations now logs only the first 50 "request didn't match expectation" entries, with the closest-match entry saying how many were left out. Every expectation is still compared, so which expectation serves the request, the closest-match entry, the 404 hint and explain output are all unchanged &mdash; only how many of these log entries <span class="inline_code">retrieveLogMessages</span>, <span class="inline_code">LOG_ENTRIES</span> output and the dashboard log show.</p>
+
+<p><strong>If your tests or tooling count these entries, or expect one per expectation:</strong></p>
+
+<pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxLoggedMatchFailures=-1</code></pre>
+<p>or</p>
+<pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_MAX_LOGGED_MATCH_FAILURES=-1</code></pre>
+
+<p><span class="inline_code">-1</span> restores the 8.0.0 behaviour of logging every comparison. See <a href="/mock_server/configuration_properties.html#button_configuration_max_logged_match_failures">Configuration &ndash; Max Logged Match Failures</a>.</p>
+
+<a id="match_binary_expectations_when_proxying" class="anchor" href="#match_binary_expectations_when_proxying">&nbsp;</a>
+
+<h3>Binary expectations now match messages on a proxied connection by default</h3>
+
+<p>In 8.0.0, binary expectations were never consulted on a connection MockServer proxies to an upstream (port forwarding, a PROXY protocol header, transparent proxying). With <span class="inline_code">matchBinaryExpectationsWhenProxying</span> now <span class="inline_code">true</span> by default, a message on such a connection whose bytes match a binary expectation is answered by that expectation and is not forwarded; every other message is forwarded as before. This only affects you if you proxy binary (non-HTTP) traffic <strong>and</strong> have binary expectations registered on the same MockServer.</p>
+
+<p><strong>To keep the 8.0.0 behaviour and always forward:</strong></p>
+
+<pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.matchBinaryExpectationsWhenProxying(false)</code></pre>
+<p>or</p>
+<pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.matchBinaryExpectationsWhenProxying=false</code></pre>
+<p>or</p>
+<pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_MATCH_BINARY_EXPECTATIONS_WHEN_PROXYING=false</code></pre>
+<p>or at runtime:</p>
+<pre class="prettyprint lang-json code"><code class="code">PUT /mockserver/configuration
+{
+  "matchBinaryExpectationsWhenProxying": false
+}</code></pre>
+
+<a id="status_code_validation" class="anchor" href="#status_code_validation">&nbsp;</a>
+
+<h3>A response statusCode outside 100&ndash;999 is now rejected</h3>
+
+<p>A blank status code in the 8.0.0 dashboard became <span class="inline_code">0</span> and registered; the server then answered <span class="inline_code">HTTP/1.1 0</span>, which HTTP clients reject. <span class="inline_code">PUT /mockserver/expectation</span> (and every client library) now refuses an expectation whose <span class="inline_code">statusCode</span> is outside 100&ndash;999 with a <span class="inline_code">400</span> naming the field; any three-digit code, such as <span class="inline_code">999</span>, is still accepted.</p>
+
+<p>Expectation files are more forgiving: an invalid expectation in an <span class="inline_code">initializationJsonPath</span> file, or in persisted expectations restored from a cloud blob store, is skipped with a WARN naming it (position, id and path) while the rest of the file loads &mdash; before, one invalid expectation skipped the whole file. With <span class="inline_code">failOnInitializationError=true</span> a skipped expectation still fails startup. A <span class="inline_code">persistedExpectationsPath</span> file that held one is copied to <span class="inline_code">&lt;file&gt;.invalid-entries-&lt;timestamp&gt;.bak</span> before MockServer first saves over it.</p>
+
+<p><strong>To migrate:</strong> search your expectation files for <span class="inline_code">"statusCode" : 0</span> and other out-of-range values, and set the status you meant.</p>
+
+<a id="http3_opt_in" class="anchor" href="#http3_opt_in">&nbsp;</a>
+
+<h3>HTTP/3 needs an opt-in jar or image, and refuses to start without it</h3>
+
+<p>The QUIC native binaries moved to a <span class="inline_code">jar-with-dependencies-http3</span> classifier, shrinking the default standalone jar from 104 MB to 93 MB. If you set <span class="inline_code">http3Port</span> without the native library present, MockServer now refuses to start and prints the exact fix, instead of logging a warning and silently ignoring the port (which is what every published 8.0.0 Docker image did, since none of them could load the native library). It also now refuses to start when the HTTP/3 port itself can't be bound (for example another process already holds that UDP port), where 8.0.0 logged a warning and served only HTTP/1.1 and HTTP/2.</p>
+
+<p><strong>If you use HTTP/3:</strong></p>
+<ul>
+  <li>Standalone jar: run <span class="inline_code">mockserver-netty-&lt;version&gt;-jar-with-dependencies-http3.jar</span></li>
+  <li>Maven/Gradle: <span class="inline_code">org.mock-server:mockserver-netty</span> already brings the right native dependency; <span class="inline_code">mockserver-netty-no-dependencies</span> includes its own copy from the release that fixed <a href="https://github.com/mock-server/mockserver-monorepo/issues/2869">#2869</a> (earlier versions of it cannot load the native)</li>
+  <li>Docker, Docker Compose or Kubernetes: from the release that fixed <a href="https://github.com/mock-server/mockserver-monorepo/issues/2869">#2869</a> the standard <span class="inline_code">mockserver/mockserver:&lt;version&gt;</span> image serves HTTP/3; the <span class="inline_code">-http3</span> tags (Helm: <span class="inline_code">image.variant=http3</span>), which earlier 9.x releases needed, are deprecated aliases of it, kept for one more release</li>
+</ul>
+
+<p>If you don't set <span class="inline_code">http3Port</span> &mdash; the default &mdash; nothing changes except a smaller standalone jar.</p>
+
+<a id="dns_refuses_to_start" class="anchor" href="#dns_refuses_to_start">&nbsp;</a>
+
+<h3>DNS mocking refuses to start if its port can't be used</h3>
+
+<p>With <span class="inline_code">dnsEnabled=true</span>, MockServer now refuses to start when it cannot start its DNS server &mdash; nearly always a fixed <span class="inline_code">dnsPort</span> that's already in use &mdash; instead of logging a warning and running without DNS. With <span class="inline_code">dnsPort</span> left at its default of <span class="inline_code">0</span>, the operating system picks a free port, so a refusal is unlikely. A common way to hit this without noticing: running more than one MockServer with the same fixed <span class="inline_code">dnsPort</span> (parallel test forks sharing one properties file, for example) &mdash; in 8.0.0 the first instance served DNS and the rest silently didn't; now every instance but the first fails to start.</p>
+
+<p><strong>To fix:</strong> free the port, choose a different <span class="inline_code">dnsPort</span>, leave <span class="inline_code">dnsPort=0</span> (default), or set <span class="inline_code">dnsEnabled=false</span>. If you don't enable DNS mocking &mdash; the default &mdash; nothing changes.</p>
+
+<a id="control_plane_500" class="anchor" href="#control_plane_500">&nbsp;</a>
+
+<h3>An unexpected control-plane failure now answers 500, not 400</h3>
+
+<p>Before, a fault inside MockServer while it handled a control-plane request (for example <span class="inline_code">PUT /mockserver/expectation</span>) was answered <span class="inline_code">400 Bad Request</span> with the exception's bare message as the body &mdash; reading as a problem with your request. It now answers <span class="inline_code">500 Internal Server Error</span> with <span class="inline_code">unexpected error processing request, see the MockServer log for correlation id: &lt;id&gt;</span>, and the log holds the stack trace under that id. A request MockServer genuinely cannot accept &mdash; unreadable JSON, a request matcher that fails validation, an invalid parameter, an unsupported operation &mdash; is still answered <span class="inline_code">400</span> with a message saying what's wrong.</p>
+
+<p><strong>If your code treats any control-plane <span class="inline_code">400</span> as "my request was bad", or catches the Java client's <span class="inline_code">IllegalArgumentException</span> as a catch-all:</strong> distinguish a genuine <span class="inline_code">500</span> (an internal MockServer fault) from a <span class="inline_code">400</span> (your request was rejected).</p>
+
+<p>Each client surfaces this differently:</p>
+<ul>
+  <li><strong>Java:</strong> the client raises <span class="inline_code">ClientException</span> for a <span class="inline_code">500</span>. <span class="inline_code">retrieveLogsByCorrelationId</span> and <span class="inline_code">retrieveActiveExpectations(requestDefinition, format)</span> now <em>throw</em> instead of returning the error body as their result for any response status &ge;400: <span class="inline_code">400</span> still raises <span class="inline_code">IllegalArgumentException</span>, <span class="inline_code">401</span> raises <span class="inline_code">AuthenticationException</span>, and every other status &ge;400 (including <span class="inline_code">500</span>) raises <span class="inline_code">ClientException</span>. Wrap calls to these two methods accordingly &mdash; see <a href="/mock_server/troubleshooting_matching.html#correlation_id_retrieval">Troubleshooting Matching &ndash; Retrieving Logs by Correlation ID</a>.</li>
+  <li><strong>PHP:</strong> the client raises <span class="inline_code">MockServerException</span> (was <span class="inline_code">InvalidRequestException</span>).</li>
+  <li><strong>Rust:</strong> the client raises <span class="inline_code">Error::UnexpectedStatus</span> (was <span class="inline_code">Error::InvalidRequest</span>).</li>
+  <li><strong>Node, Python, Ruby, Go, .NET:</strong> unchanged.</li>
+</ul>
+
+<a id="control_plane_mtls" class="anchor" href="#control_plane_mtls">&nbsp;</a>
+
+<h3>Control-plane mTLS trusts only the configured CA chain</h3>
+
+<p>With control-plane mTLS and a <span class="inline_code">controlPlaneTLSMutualAuthenticationCAChain</span> set, both sides used to also trust MockServer's own CA certificate (<span class="inline_code">certificateAuthorityCertificate</span>, by default the bundled CA whose private key is published) alongside the configured chain. They now trust <strong>only</strong> the chain:</p>
+
+<ul>
+  <li><strong>Server:</strong> MockServer now accepts only client certificates signed by the chain. If your control-plane client certificates are signed by MockServer's own CA, add that CA to the chain (or, if it's the bundled default CA, sign your client certificates with your own CA instead). With <strong>no</strong> chain set and control-plane mTLS required, MockServer now refuses to start if it would fall back to the bundled default CA &mdash; set the chain, or give MockServer its own CA with <span class="inline_code">certificateAuthorityCertificate</span> and <span class="inline_code">certificateAuthorityPrivateKey</span>.</li>
+  <li><strong>Java client</strong> (<span class="inline_code">MockServerClient</span>, the JUnit 4 rule, JUnit 5 extension, Spring test listener): it now trusts only the chain for MockServer's certificate. If MockServer's certificate is signed by MockServer's own default CA, add that CA certificate to the chain the client uses, or the TLS handshake fails. Do not do this where MockServer reads the same chain (the JUnit rule and extension, the Spring test listener, or <span class="inline_code">ClientAndServer</span> in one JVM): MockServer refuses to start if its control-plane chain contains the bundled default CA, because its private key is published. Give MockServer its own CA with <span class="inline_code">certificateAuthorityCertificate</span> and <span class="inline_code">certificateAuthorityPrivateKey</span> and put that CA in the chain instead.</li>
+</ul>
+
+<p>Without control-plane mTLS, nothing changes. See <a href="/mock_server/control_plane_authorisation.html">Control Plane Authorisation</a> and <a href="/mock_server/HTTPS_TLS.html">HTTPS &amp; TLS</a>.</p>
+
+<a id="mtls_bundled_ca" class="anchor" href="#mtls_bundled_ca">&nbsp;</a>
+
+<h3>mTLS never trusts the bundled default CA</h3>
+
+<p>When mTLS is on (<span class="inline_code">tlsMutualAuthenticationRequired=true</span>, or a <span class="inline_code">tlsMutualAuthenticationCertificateChain</span> is set), MockServer used to accept client certificates signed by its own CA. By default that is the CA bundled with MockServer, and its private key is published in the MockServer jar, so anyone could create a client certificate MockServer accepted. MockServer now never trusts the bundled CA for client certificates:</p>
+
+<ul>
+  <li><strong>mTLS on, no chain, default CA:</strong> MockServer refuses to start, and <span class="inline_code">PUT /mockserver/configuration</span> answers <span class="inline_code">400</span>. The message names the fix.</li>
+  <li><strong>A chain that contains the bundled CA:</strong> the same.</li>
+  <li><strong>A chain without the bundled CA, default CA:</strong> MockServer starts and trusts only the chain. A client certificate signed by MockServer's default CA, such as the one <span class="inline_code">MockServerClient</span> presents by default, is no longer accepted.</li>
+</ul>
+
+<p>To fix it, do one of these:</p>
+
+<ul>
+  <li>give MockServer its own CA with <span class="inline_code">certificateAuthorityCertificate</span> and <span class="inline_code">certificateAuthorityPrivateKey</span>, and sign your client certificates with it;</li>
+  <li>set <span class="inline_code">dynamicallyCreateCertificateAuthorityCertificate=true</span>, so MockServer creates a CA of its own (a client in the same JVM, such as <span class="inline_code">ClientAndServer</span> or the JUnit rule, then presents a certificate signed by it);</li>
+  <li>set <span class="inline_code">tlsMutualAuthenticationCertificateChain</span> to the CA that signs your client certificates.</li>
+</ul>
+
+<p>For a throwaway local test only, <span class="inline_code">tlsMutualAuthenticationAllowBundledCa=true</span> restores the old behaviour. Because anyone can then create a client certificate MockServer accepts, a warning is logged whenever the bundled CA becomes trusted (at startup, when a configuration change makes it trusted, and each time the TLS context is rebuilt to trust it). It can only be set at startup. See <a href="/mock_server/HTTPS_TLS.html#mtls_data_plane">HTTPS &amp; TLS</a>.</p>
+
+<a id="docker_helm" class="anchor" href="#docker_helm">&nbsp;</a>
+
+<h2>Docker &amp; Helm</h2>
+
+<p>The only Docker/Helm-specific change is the HTTP/3 opt-in image above: if you set <span class="inline_code">http3Port</span>, use the standard <span class="inline_code">mockserver/mockserver:&lt;version&gt;</span> image from the release that fixed <a href="https://github.com/mock-server/mockserver-monorepo/issues/2869">#2869</a> (earlier 9.x releases need the <span class="inline_code">-http3</span> tag, Helm <span class="inline_code">image.variant=http3</span>, now a deprecated alias). No other Docker image or Helm chart behaviour in this list is breaking on its own &mdash; the config and binary-proxying changes below apply identically whether MockServer runs in a container or not.</p>
+
+<a id="binary_proxying" class="anchor" href="#binary_proxying">&nbsp;</a>
+
+<h2>Binary (non-HTTP) proxying</h2>
+
+<a id="binary_forwarder_removed" class="anchor" href="#binary_forwarder_removed">&nbsp;</a>
+
+<h3>One upstream connection per client connection; forwardBinaryRequestsWithoutWaitingForResponse removed</h3>
+
+<p>Proxying a binary (non-HTTP) protocol through MockServer used to open a new upstream connection for every message. A client's connection now gets <strong>one</strong> upstream connection for its whole life: every message the client sends is written to it, whatever the upstream sends back is relayed as it arrives, and when the client closes its connection the upstream connection is closed too. A client whose upstream never answers is no longer cut off after <span class="inline_code">maxFutureTimeout</span>.</p>
+
+<p>Through an upstream proxy, the one connection is now a tunnel: SOCKS5 through <span class="inline_code">forwardSocksProxy</span>, or <span class="inline_code">CONNECT</span> through <span class="inline_code">forwardHttpsProxy</span> or <span class="inline_code">forwardHttpProxy</span> (with <span class="inline_code">forwardProxyAuthenticationUsername</span>/<span class="inline_code">forwardProxyAuthenticationPassword</span> when set). 8.0.0 sent the raw bytes to <span class="inline_code">forwardHttpProxy</span> as if it were the server itself. <strong>Many proxies refuse <span class="inline_code">CONNECT</span> to ports other than 443</strong> &mdash; if yours does, list the server in <span class="inline_code">noProxyHosts</span>. A refused <span class="inline_code">CONNECT</span> closes the client's connection with one warning naming the proxy, the setting and the status it answered.</p>
+
+<p>A client that starts TLS part way through a session (such as PostgreSQL with <span class="inline_code">sslmode=require</span>) now has its upstream connection upgraded to TLS on the same connection, so a database like this can be proxied end-to-end (SCRAM channel binding needs <span class="inline_code">channelBinding=disable</span> in the client, or MockServer must be given the server's own certificate).</p>
+
+<p><strong>To migrate:</strong> remove <span class="inline_code">forwardBinaryRequestsWithoutWaitingForResponse</span> from your configuration &mdash; a value still set is ignored, with one warning at start-up, and nothing brings per-message forwarding back. In Java code, remove calls to the (now removed) <span class="inline_code">forwardBinaryRequestsWithoutWaitingForResponse</span> methods on <span class="inline_code">ConfigurationProperties</span> and <span class="inline_code">Configuration</span>, both <span class="inline_code">NettyHttpClient.sendRequest(BinaryMessage, ...)</span> overloads, and any reference to <span class="inline_code">MockServerBinaryClientCodec</span> or its encoder/decoder.</p>
+
+<p>If you don't proxy binary protocols, nothing changes. See <a href="#match_binary_expectations_when_proxying">Binary expectations now match messages on a proxied connection</a> above, which interacts with this change.</p>
+
+<a id="initialisation_files" class="anchor" href="#initialisation_files">&nbsp;</a>
+
+<h2>Expectation initialisation files</h2>
+
+<a id="init_duplicate_id" class="anchor" href="#init_duplicate_id">&nbsp;</a>
+
+<h3>A repeated id now keeps the last entry, matching PUT /mockserver/expectation</h3>
+
+<p>Loading an <span class="inline_code">initializationJsonPath</span> file &mdash; at start-up or on a <span class="inline_code">--watch</span> reload &mdash; used to keep the <strong>first</strong> expectation for each repeated <span class="inline_code">id</span> in a file and ignore later ones. <span class="inline_code">PUT /mockserver/expectation</span> has always kept the <strong>last</strong>, because it upserts each entry in turn. File loading now matches that: the kept expectation serves from the first entry's place (as an in-place update would), and a file loaded later still replaces an earlier file's expectation with the same id.</p>
+
+<p><span class="inline_code">mockserver lint</span> and the WARN logged when a file loads now report each replaced expectation as <span class="inline_code">DUPLICATE_ID</span>, naming whether a later entry in the same file or a later file replaced it.</p>
+
+<p><strong>To migrate:</strong> if a file relies on its <em>first</em> entry for a repeated id being served, remove the repeated ids or reorder so the entry you want served is last.</p>
+
+<p>See also <a href="#status_code_validation">statusCode validation</a> above, which changes how an invalid entry in the same files is handled (skipped with a WARN, not fatal for the whole file).</p>
+
+<a id="verification" class="anchor" href="#verification">&nbsp;</a>
+
+<h2>Verification &amp; log output</h2>
+
+<a id="verification_wording" class="anchor" href="#verification_wording">&nbsp;</a>
+
+<h3>Over-count verification failures now say "found ... but should have been found ..."</h3>
+
+<p>When a verification's upper bound is exceeded (<span class="inline_code">never()</span>, <span class="inline_code">exactly(n)</span>, <span class="inline_code">atMost(n)</span>, <span class="inline_code">between(m, n)</span>, or <span class="inline_code">verifyZeroInteractions()</span>), the failure message now reads, for example:</p>
+
+<pre class="code" style="padding: 2px;"><code class="code">Request found 1 time but should have been found exactly 0 times, expected:&lt;...&gt; but was:&lt;...&gt;</code></pre>
+
+<p>where it used to read:</p>
+
+<pre class="code" style="padding: 2px;"><code class="code">Request not found exactly 0 times, expected:&lt;...&gt; but was:&lt;...&gt;</code></pre>
+
+<p>("Response found ..." likewise for response verification.) Failures for too <em>few</em> matches are unchanged and still start with "Request not found" / "Response not found".</p>
+
+<p><strong>To migrate:</strong> update any test assertion on the exact text of an over-count failure to the new wording, or assert on "found" plus the times instead.</p>
+
+<a id="response_body_verification" class="anchor" href="#response_body_verification">&nbsp;</a>
+
+<h3>Response-body verification now applies the matcher instead of ignoring it</h3>
+
+<p>Verifying a response by body (<span class="inline_code">httpResponse</span> in <span class="inline_code">PUT /mockserver/verify</span>, <span class="inline_code">httpResponses</span> in <span class="inline_code">/mockserver/verifySequence</span>, or <span class="inline_code">verify(..., response()..., ...)</span>) with a regex, JSON path, JSON Schema, XPath, XML Schema, form, multipart, fuzzy, GraphQL, JSON-RPC, WASM or allOf matcher, or with <span class="inline_code">matchType</span> or <span class="inline_code">not</span>, is now actually applied. Before, it was ignored and the verification passed whenever any recorded response had a JSON object body &mdash; whatever it contained.</p>
+
+<p><strong>If a response verification starts failing after you upgrade:</strong> it passed only because the matcher was ignored. Fix the matcher or the system under test. In Java, use <span class="inline_code">response().withBodyMatching(...)</span> for these matcher types.</p>
+
+<a id="openapi_verification" class="anchor" href="#openapi_verification">&nbsp;</a>
+
+<h3>OpenAPI request verification now counts only matching operations</h3>
+
+<p><span class="inline_code">PUT /mockserver/verify</span> (or <span class="inline_code">verify(openAPI(...), ...)</span>) with a <span class="inline_code">specUrlOrPayload</span> and <span class="inline_code">operationId</span> used to ignore the spec entirely and count <em>every</em> recorded request, so such a verification could pass when it should have failed. It now counts only requests for that operation.</p>
+
+<p><strong>If a verification starts failing after you upgrade:</strong> fix the matcher or the system under test; <span class="inline_code">verifySequence</span> was not affected by this bug.</p>
+
+<a id="asyncapi_verification" class="anchor" href="#asyncapi_verification">&nbsp;</a>
+
+<h3>AsyncAPI verify rejects count constraints at the top level</h3>
+
+<p><span class="inline_code">PUT /mockserver/asyncapi/verify</span> (or the Java client's <span class="inline_code">verifyAsyncMessage</span>) now answers <span class="inline_code">400</span> if <span class="inline_code">atLeast</span>, <span class="inline_code">atMost</span> or <span class="inline_code">exactly</span> is sent at the top level, or if any field the endpoint doesn't know is sent &mdash; where it used to silently check "at least 1 message" instead.</p>
+
+<p><strong>To migrate:</strong> put count constraints inside <span class="inline_code">count</span>:</p>
+
+<pre class="prettyprint lang-json code"><code class="code">{ "channel": "orders", "count": { "atMost": 0 } }</code></pre>
+
+<p>instead of:</p>
+
+<pre class="prettyprint lang-json code"><code class="code">{ "channel": "orders", "atMost": 0 }</code></pre>
+
+<a id="log_entries_format" class="anchor" href="#log_entries_format">&nbsp;</a>
+
+<h3>LOG_ENTRIES writes each body once; message/arguments show a short form</h3>
+
+<p>A log entry retrieved with <span class="inline_code">format=LOG_ENTRIES</span> used to write its request three times: in <span class="inline_code">httpRequest</span>, again as an element of <span class="inline_code">arguments</span>, and again inside the rendered <span class="inline_code">message</span>. The full request and response are now written only in <span class="inline_code">httpRequest</span>/<span class="inline_code">httpRequests</span> and <span class="inline_code">httpResponse</span>; where <span class="inline_code">arguments</span> and <span class="inline_code">message</span> refer to that same request or response, they now show a short form &mdash; its method and path (for example <span class="inline_code">"POST /orders"</span>), or its status code (for example <span class="inline_code">"201"</span>) &mdash; the same way <span class="inline_code">compactLogFormat</span> already shows them on the console. This also applies to the MCP <span class="inline_code">retrieve_logs</span> and <span class="inline_code">raw_retrieve</span> tools. An argument that is a <em>different</em> request or response (for example the one a request was compared with) is still written in full.</p>
+
+<p><strong>To migrate:</strong> read a request or response body from the entry's <span class="inline_code">httpRequest</span> or <span class="inline_code">httpResponse</span> field instead of from <span class="inline_code">message</span> or <span class="inline_code">arguments</span>.</p>
+
+<a id="genai_span_names" class="anchor" href="#genai_span_names">&nbsp;</a>
+
+<h3>GenAI trace spans: Gemini and text completions renamed</h3>
+
+<p>Following the OpenTelemetry GenAI semantic conventions, spans for calls that aren't chat completions are no longer all named <span class="inline_code">chat</span>:</p>
+
+<ul>
+  <li>Gemini calls are now <span class="inline_code">generate_content</span></li>
+  <li>Legacy, fill-in-the-middle and Ollama <span class="inline_code">/api/generate</span> completions, and forwarded AWS Bedrock <span class="inline_code">InvokeModel</span> calls to prompt-string models, are now <span class="inline_code">text_completion</span></li>
+</ul>
+
+<p>Separately, embeddings and rerank spans are now named <span class="inline_code">embeddings &lt;model&gt;</span> / <span class="inline_code">rerank &lt;model&gt;</span> instead of <span class="inline_code">chat &lt;model&gt;</span>. Token/cost metrics are unaffected by any of these renames, since they're labelled by provider/model, not operation.</p>
+
+<p><strong>To migrate:</strong> if a trace query, dashboard or alert finds completions by <span class="inline_code">gen_ai.operation.name == "chat"</span> (or a <span class="inline_code">chat </span> span-name prefix), also match <span class="inline_code">generate_content</span> and <span class="inline_code">text_completion</span>, and update any query/alert selecting embeddings or rerank spans by name or operation. See <a href="/mock_server/observability.html#genai_spans">Observability &ndash; GenAI Spans</a>.</p>
+
+<a id="java_client" class="anchor" href="#java_client">&nbsp;</a>
+
+<h2>Java client</h2>
+
+<p>The Java client (including the JUnit 4 rule, JUnit 5 extension and Spring test listener) is affected by several changes covered elsewhere on this page:</p>
+
+<ul>
+  <li><a href="#control_plane_mtls">Control-plane mTLS now trusts only the configured CA chain</a> &mdash; the client, not only the server.</li>
+  <li><a href="#binary_forwarder_removed">The removed binary-forwarding APIs</a>: <span class="inline_code">ConfigurationProperties</span>/<span class="inline_code">Configuration.forwardBinaryRequestsWithoutWaitingForResponse</span>, both <span class="inline_code">NettyHttpClient.sendRequest(BinaryMessage, ...)</span> overloads, and the <span class="inline_code">MockServerBinaryClientCodec</span> classes.</li>
+  <li><a href="#control_plane_500">An unexpected control-plane failure now answers <span class="inline_code">500</span>, not <span class="inline_code">400</span></a> &mdash; if your code catches the client's <span class="inline_code">IllegalArgumentException</span> as a catch-all for control-plane failures, it will no longer see that exception for an internal MockServer fault, only for a request MockServer genuinely rejects. <span class="inline_code">retrieveLogsByCorrelationId</span> and <span class="inline_code">retrieveActiveExpectations(requestDefinition, format)</span> now throw (<span class="inline_code">IllegalArgumentException</span> for <span class="inline_code">400</span>, <span class="inline_code">AuthenticationException</span> for <span class="inline_code">401</span>, <span class="inline_code">ClientException</span> otherwise) for any response status &ge;400, instead of returning its body as a string.</li>
+  <li><a href="#asyncapi_verification">AsyncAPI verify rejects unknown/top-level count fields</a> &mdash; <span class="inline_code">verifyAsyncMessage</span> now answers <span class="inline_code">400</span> for a top-level <span class="inline_code">atLeast</span>/<span class="inline_code">atMost</span>/<span class="inline_code">exactly</span> or an unknown field, instead of silently checking "at least 1 message".</li>
+  <li><a href="#verification_wording">The over-count verification wording change</a> &mdash; any test asserting the exact text of a <span class="inline_code">never()</span>/<span class="inline_code">atMost</span>/<span class="inline_code">exactly</span>/<span class="inline_code">between</span> failure needs updating.</li>
+</ul>
+
+<a id="node_client" class="anchor" href="#node_client">&nbsp;</a>
+
+<h2>Node / TypeScript client</h2>
+
+<a id="node_llm_typings" class="anchor" href="#node_llm_typings">&nbsp;</a>
+
+<h3>mockserver-client/llm typings drop their default export</h3>
+
+<p>For TypeScript users of the Node client's deep import <span class="inline_code">mockserver-client/llm</span>: its typings now describe the module as a plain object of named exports, matching what the JavaScript has always done. Everything imported from <span class="inline_code">mockserver-client</span> itself type-checks exactly as it did in 8.0.0.</p>
+
+<p><strong>To migrate:</strong></p>
+<ul>
+  <li>A <strong>default import without <span class="inline_code">esModuleInterop</span>/<span class="inline_code">allowSyntheticDefaultImports</span></strong> no longer compiles. Use <span class="inline_code">import llm = require('mockserver-client/llm')</span>, <span class="inline_code">import * as llm from 'mockserver-client/llm'</span>, <span class="inline_code">import { llm } from 'mockserver-client'</span>, or turn on <span class="inline_code">esModuleInterop</span>.</li>
+  <li><strong>Reading the module's <span class="inline_code">.default</span> property</strong> is now a compile error &mdash; drop <span class="inline_code">.default</span> from the access.</li>
+  <li><strong>Named imports, <span class="inline_code">import * as</span>, and <span class="inline_code">require</span> in type-checked JavaScript</strong> now all type-check.</li>
+  <li><strong>Declaring your own value with the same name as an imported builder type</strong> (<span class="inline_code">Provider</span>, <span class="inline_code">Role</span>, or one of the ten builder names) is now a compile error (<span class="inline_code">TS2440</span>) instead of silently shadowing the type import &mdash; use the imported value, or rename your import (<span class="inline_code">import { Provider as ProviderName }</span>).</li>
+  <li>A <strong>module augmentation of <span class="inline_code">mockserver-client/llm</span></strong> still compiles but reaches less: members added to a builder interface or to <span class="inline_code">Llm</span> are no longer visible on the factories/builders or on the object imported from that path. Augment <span class="inline_code">mockserver-client</span> or the new <span class="inline_code">mockserver-client/llmTypes</span> instead &mdash; builder types now live there. <span class="inline_code">TurnBuilder</span> is now declared alongside the other builder constructors.</li>
+</ul>
+
+<a id="node_exports_map" class="anchor" href="#node_exports_map">&nbsp;</a>
+
+<h3>mockserver-client and mockserver-node now have an exports map</h3>
+
+<p>Both packages now declare an <span class="inline_code">exports</span> map. Importing or requiring a path it doesn't name &mdash; a <span class="inline_code">.d.ts</span> file, anything under <span class="inline_code">test/</span>, or the launcher's <span class="inline_code">tasks/mockServer.js</span> &mdash; now fails with <span class="inline_code">ERR_PACKAGE_PATH_NOT_EXPORTED</span>, where previously any file inside either package could be required. In exchange, an ES module can now import a deep path (for example <span class="inline_code">mockserver-client/llm</span>) without its <span class="inline_code">.js</span> extension, which failed with <span class="inline_code">ERR_MODULE_NOT_FOUND</span> in 8.0.0.</p>
+
+<p>The map names the package itself, and each client module with and without <span class="inline_code">.js</span>: <span class="inline_code">index</span>, <span class="inline_code">llm</span>, <span class="inline_code">setupMockServer</span>, <span class="inline_code">mockServerClient</span>, <span class="inline_code">mcpMockBuilder</span>, <span class="inline_code">a2aMockBuilder</span>, <span class="inline_code">sendRequest</span>, <span class="inline_code">webSocketClient</span>, plus the types-only <span class="inline_code">llmTypes</span> and <span class="inline_code">mockServer</span>; the launcher's map names <span class="inline_code">index</span>, <span class="inline_code">downloadJar</span>, <span class="inline_code">downloadBinary</span>; and both name <span class="inline_code">package.json</span>.</p>
+
+<p><strong>To migrate:</strong> import the package itself or one of the listed paths. If you need a file by its on-disk location, resolve <span class="inline_code">&lt;package&gt;/package.json</span> and work from there.</p>
+
+<a id="node_retrieve_typing" class="anchor" href="#node_retrieve_typing">&nbsp;</a>
+
+<h3>retrieveRecordedRequests / retrieveRecordedRequestsById now typed as requests</h3>
+
+<p>These methods were typed <span class="inline_code">Promise&lt;HttpResponse[]&gt;</span> in 8.0.0 although they return the <em>recorded requests</em>, so reading a result's <span class="inline_code">path</span> didn't compile without a cast. They're now typed <span class="inline_code">Promise&lt;RequestDefinition[]&gt;</span> (a DNS or binary filter can return DNS queries or binary messages, which have no HTTP fields).</p>
+
+<p><strong>To migrate:</strong> code that reads <span class="inline_code">.headers</span>, <span class="inline_code">.body</span> or <span class="inline_code">.cookies</span> on a result, or declares the results as <span class="inline_code">HttpResponse[]</span>, no longer compiles. Narrow each result to <span class="inline_code">HttpRequest</span> first:</p>
+
+<pre class="prettyprint lang-typescript code"><code class="code">if ('path' in request) {
+  console.log(request.headers);
+}</code></pre>
+
+<a id="other_clients" class="anchor" href="#other_clients">&nbsp;</a>
+
+<h2>Other clients</h2>
+
+<a id="rust_enums" class="anchor" href="#rust_enums">&nbsp;</a>
+
+<h3>Rust client: every public enum is now #[non_exhaustive]</h3>
+
+<p>A <span class="inline_code">match</span> on any public enum in the Rust crate that lists every variant no longer compiles. This includes <span class="inline_code">LoadThresholdMetric</span>, which also gains a <span class="inline_code">CheckFailureRate</span> variant (what MockServer sends for a <span class="inline_code">CHECK_FAILURE_RATE</span> threshold, which the enum couldn't represent before).</p>
+
+<p>The enums MockServer sends &mdash; <span class="inline_code">ResponseMode</span>, <span class="inline_code">BinaryUpstream</span>, <span class="inline_code">CrossProtocolTrigger</span> and the <span class="inline_code">Load*</span> enums &mdash; also gain an <span class="inline_code">Unknown</span> variant: a value this client version doesn't know, sent by a newer MockServer, now reads as <span class="inline_code">Unknown</span> instead of failing the whole response. <span class="inline_code">Unknown</span> cannot be sent back: serialising it, or sending an expectation or load scenario that holds it, returns an error and nothing reaches the server. To re-submit server JSON unchanged, use <span class="inline_code">upsert_raw</span>.</p>
+
+<p><strong>To migrate:</strong> add a wildcard arm to any exhaustive <span class="inline_code">match</span>:</p>
+
+<pre class="prettyprint lang-rust code"><code class="code">match metric {
+    LoadThresholdMetric::CheckFailureRate => ...,
+    _ => ...,
+}</code></pre>
+
+<p>If you don't use the Rust client, nothing changes.</p>
+
+<a id="go_module_path" class="anchor" href="#go_module_path">&nbsp;</a>
+
+<h3>Go module path moves to /v9</h3>
+
+<p>Following Go's module-versioning rules for a major version, the Go client's module path and the Testcontainers-Go module's path for 9.0.0 gain a <span class="inline_code">/v9</span> suffix.</p>
+
+<p><strong>To migrate:</strong> update the import path in your code and fetch the new major version:</p>
+
+<pre class="code" style="padding: 2px;"><code class="code">go get github.com/mock-server/mockserver-monorepo/mockserver-client-go/v9</code></pre>
+
+<p>and update the corresponding import statements from the old (pre-9.0.0) path to the <span class="inline_code">/v9</span> path. Do the same for the Testcontainers-Go module if you use it.</p>
+
+<a id="non_breaking_changes" class="anchor" href="#non_breaking_changes">&nbsp;</a>
+
+<h2>Non-breaking changes that can still affect an unmodified setup</h2>
+
+<p>None of these are in the <span class="inline_code">BREAKING</span> list above, but each changes the behaviour of a server or client that sets nothing new &mdash; worth checking even if the table at the top says you're unaffected.</p>
+
+<a id="docker_jar_split" class="anchor" href="#docker_jar_split">&nbsp;</a>
+
+<h3>Docker image: jar split</h3>
+
+<p>If you override the standard Docker images' <span class="inline_code">ENTRYPOINT</span> or copy the jar out of them: <span class="inline_code">/mockserver-netty-jar-with-dependencies.jar</span> is now split into <span class="inline_code">/mockserver.jar</span> and <span class="inline_code">/mockserver-deps.jar</span>. Use <span class="inline_code">-cp /mockserver.jar:/mockserver-deps.jar:/libs/*</span> &mdash; <span class="inline_code">java -jar /mockserver.jar</span> still runs, but without the image's AppCDS start-up archive, so it starts more slowly. See <a href="/where/docker.html#docker_container_default_command">Running the Docker Container</a>.</p>
+
+<a id="forward_proxy_block_private_networks_502" class="anchor" href="#forward_proxy_block_private_networks_502">&nbsp;</a>
+
+<h3>forwardProxyBlockPrivateNetworks: service-name Host headers now get 502</h3>
+
+<p>With <span class="inline_code">forwardProxyBlockPrivateNetworks</span> on, a request that matches no expectation and whose <span class="inline_code">Host</span> header names MockServer itself by a name it doesn't recognise as its own (a Docker Compose or Kubernetes service name, for example) now gets <span class="inline_code">502 Bad Gateway</span> instead of <span class="inline_code">404 Not Found</span>, because that name resolves to a private address. Add the name to <span class="inline_code">noProxyHosts</span>, or set <span class="inline_code">attemptToProxyIfNoMatchingExpectation=false</span> if MockServer isn't used as a proxy, to get the <span class="inline_code">404</span> back.</p>
+
+<a id="local_bound_ip_dns_http3" class="anchor" href="#local_bound_ip_dns_http3">&nbsp;</a>
+
+<h3>localBoundIP now also binds the DNS and HTTP/3 ports</h3>
+
+<p>If you set <span class="inline_code">localBoundIP</span>, it now also keeps the DNS and HTTP/3 UDP ports on that address, where they previously listened on every address of the host even when it was set. A DNS query or HTTP/3 request sent to another address of the host is no longer answered &mdash; send them to the <span class="inline_code">localBoundIP</span> address, or leave <span class="inline_code">localBoundIP</span> unset.</p>
+
+<a id="http1_request_header_limits" class="anchor" href="#http1_request_header_limits">&nbsp;</a>
+
+<h3>HTTP/1.1 request line and header size limits are now on by default</h3>
+
+<p><span class="inline_code">maxInitialLineLength</span> (64 KB) and <span class="inline_code">maxHeaderSize</span> (256 KB) were previously unlimited. A request line longer than the limit now gets <span class="inline_code">414</span>, oversized headers get <span class="inline_code">431</span>, and any other request MockServer cannot read (an invalid header, a chunked body with an invalid chunk size) gets <span class="inline_code">400</span>, with the connection then closed &mdash; where before such a request was logged as an <span class="inline_code">ERROR</span> and matched/answered from whatever had been read. Set either property to <span class="inline_code">2147483647</span> to remove the limit.</p>
+
+<a id="max_event_log_size_default" class="anchor" href="#max_event_log_size_default">&nbsp;</a>
+
+<h3>maxEventLogSizeInBytes is now on by default</h3>
+
+<p>The event log is now bounded by size as well as by count: <span class="inline_code">maxEventLogSizeInBytes</span> defaults to a twentieth of heap at <span class="inline_code">WARN</span> and below, a twelfth at <span class="inline_code">INFO</span> and above (releases after 9.0 use a twentieth at <span class="inline_code">INFO</span> too; see <a href="/mock_server/configuration_properties.html#button_configuration_max_event_log_size_in_bytes">maxEventLogSizeInBytes</a>). Set it to <span class="inline_code">0</span> to restore count-only bounding (<span class="inline_code">maxLogEntries</span>) &mdash; though an explicitly-set value you already relied on may now retain fewer entries than before, since it is now enforced rather than ignored.</p>
+
+<a id="idle_and_write_stall_timeouts" class="anchor" href="#idle_and_write_stall_timeouts">&nbsp;</a>
+
+<h3>Idle-connection and stalled-write timeouts</h3>
+
+<p>Idle client connections now close after 5 minutes by default (<span class="inline_code">inboundConnectionIdleTimeoutMillis</span>; set <span class="inline_code">0</span> to restore unlimited). A client that stops reading a response now has that response ended as incomplete after 1 minute of nothing being read (<span class="inline_code">responseWriteStallTimeoutMillis</span>; set <span class="inline_code">0</span> to disable): an HTTP/1.1 connection or tunnel is closed, and an HTTP/2 or HTTP/3 stream is reset while other streams on the same connection continue.</p>
+
+<a id="docker_heap_cap" class="anchor" href="#docker_heap_cap">&nbsp;</a>
+
+<h3>Docker images: JVM heap cap drops from 75% to 45% of the container memory limit</h3>
+
+<p>Because ZGC's working-set-under-load plus off-heap footprint could otherwise exceed the container limit and get OOM-killed, the heap is now three-fifths of what the 75% cap in 8.0.0 gave at every container size (for example 232 MiB instead of 384 MiB at a 512 MiB limit, 922 MiB instead of 1,536 MiB at 2 GiB). <strong>512 MiB is now the smallest supported container memory limit (768 MiB for <span class="inline_code">-clustered</span>); 256 MiB is no longer supported</strong> unless you also set a small explicit heap.</p>
+
+<p>Because <span class="inline_code">maxLogEntries</span> defaults off the heap ceiling when not set explicitly (below its 250,000 cap it scales with the heap), the smaller default heap changes its computed default too:</p>
+
+<table class="table-scroll">
+  <thead><tr><th>Container memory limit</th><th>8.0.0 default <span class="inline_code">maxLogEntries</span></th><th>9.0.0 default <span class="inline_code">maxLogEntries</span></th></tr></thead>
+  <tbody>
+    <tr><td>512 MiB</td><td>at most ~45,000 (less whatever heap was in use at start-up)</td><td>27,136</td></tr>
+    <tr><td>1 GiB</td><td>at most ~92,500 (less whatever heap was in use at start-up)</td><td>56,576</td></tr>
+    <tr><td>2 GiB</td><td>100,000 (flat cap)</td><td>115,456</td></tr>
+    <tr><td>4 GiB</td><td>100,000 (flat cap)</td><td>233,472</td></tr>
+  </tbody>
+</table>
+
+<p>So the new default is <strong>lower</strong> on small containers and <strong>higher</strong> on large ones. To keep a larger heap (and <span class="inline_code">maxLogEntries</span> default), set <span class="inline_code">-Xmx</span> explicitly via <span class="inline_code">JAVA_TOOL_OPTIONS</span> (keeping <span class="inline_code">-XX:+UseZGC</span>) and size the container <span class="inline_code">--memory</span> limit for it.</p>
+
+<a id="docker_zgc_default" class="anchor" href="#docker_zgc_default">&nbsp;</a>
+
+<h3>Docker images now use ZGC by default</h3>
+
+<p>Images now use ZGC by default instead of G1 (the <span class="inline_code">-aot</span> image keeps G1, for its cold-start profile, and the <span class="inline_code">-webhook</span> test-tool image is unchanged; the <span class="inline_code">-clustered</span> image needs generational ZGC explicitly &mdash; its JDK 21 base defaults ZGC to single-generational, so the image sets <span class="inline_code">JAVA_TOOL_OPTIONS="-XX:+UseZGC -XX:+ZGenerational"</span> in its environment; <span class="inline_code">-XX:+ZGenerational</span> is obsolete, and absent, from JDK 23 on, so the standard/local/<span class="inline_code">-aot</span>/<span class="inline_code">-graaljs</span> images don't set it). Override with <span class="inline_code">JAVA_TOOL_OPTIONS=-XX:+UseG1GC</span> &mdash; note that setting <span class="inline_code">JAVA_TOOL_OPTIONS</span> yourself for <em>any</em> reason replaces the image's default entirely, so include <span class="inline_code">-XX:+UseZGC</span> (and, on <span class="inline_code">-clustered</span>, <span class="inline_code">-XX:+ZGenerational</span> too) unless you want G1 back. Switching to G1 also loses the AppCDS start-up archive, which is trained under ZGC, so G1 start-up is slower on the standard/local images. On Helm, set <span class="inline_code">app.jvmOptions</span> to change <span class="inline_code">JAVA_TOOL_OPTIONS</span>.</p>
+
+<a id="junit_dev_mode_default" class="anchor" href="#junit_dev_mode_default">&nbsp;</a>
+
+<h3>JUnit rule/extension now default to "dev mode"</h3>
+
+<p>The JUnit 4 rule and JUnit 5 extension now default to <span class="inline_code">maxLogEntries=1000</span> and <span class="inline_code">maxExpectations=1000</span> instead of deriving them from heap, cutting memory across many in-JVM instances. A suite relying on deeper log history should raise the caps explicitly or set <span class="inline_code">mockserver.devMode=false</span>.</p>
+
+<a id="rust_delay_http_template_fields" class="anchor" href="#rust_delay_http_template_fields">&nbsp;</a>
+
+<h3>Rust client: Delay/HttpTemplate struct literals need newly-added fields</h3>
+
+<p>Struct-literal callers of <span class="inline_code">Delay</span>/<span class="inline_code">HttpTemplate</span> (rather than the provided constructors/builders) need to set newly-added fields: <span class="inline_code">distribution</span> and <span class="inline_code">template</span>/<span class="inline_code">template_type</span> on <span class="inline_code">Delay</span>; <span class="inline_code">delay</span>, <span class="inline_code">primary</span>, <span class="inline_code">response_override</span> and <span class="inline_code">response_modifier</span> on <span class="inline_code">HttpTemplate</span> (not WebSocket/SSE settings &mdash; <span class="inline_code">HttpTemplate</span> has none) &mdash; or the struct literal no longer compiles. If you don't use the Rust client, or always build these with the provided constructors, nothing changes.</p>
+
+<a id="python_client_other_changes" class="anchor" href="#python_client_other_changes">&nbsp;</a>
+
+<h3>Python client: http_request/http_response are now deprecated aliases</h3>
+
+<p><span class="inline_code">http_request</span>/<span class="inline_code">http_response</span> on <span class="inline_code">HttpOverrideForwardedRequest</span> now work only as deprecated aliases of <span class="inline_code">request_override</span>/<span class="inline_code">response_override</span> (which previously raised <span class="inline_code">TypeError</span> if used at all) &mdash; prefer the non-deprecated names in new code. If you don't use the Python client's forward-override builder, nothing changes.</p>
+
+<a id="other_things_worth_checking" class="anchor" href="#other_things_worth_checking">&nbsp;</a>
+
+<h3>Other things worth checking</h3>
+
+<ul>
+  <li><strong>Maven plugin:</strong> the <span class="inline_code">run</span>/<span class="inline_code">runForked</span> goals now fail the build when MockServer doesn't start, instead of logging an error and carrying on without a running server.</li>
+  <li><strong>Import ids:</strong> HAR and Postman import (not OpenAPI, which never used this scheme) now derive each imported expectation's <span class="inline_code">id</span> from the request it matches, instead of from the entry's position in the file (<span class="inline_code">har-0</span>, <span class="inline_code">har-1</span>, &hellip;). Re-importing the <em>same</em> file already updated its own expectations in place under the old scheme too; what's fixed is a <em>different</em> file importing entries at the same positions, which no longer collides with, and silently overwrites, the first file's expectations. If you re-import a file (or an older export of one) that you already imported under 8.0.0, clear the existing expectations once first, or you may end up with both the old position-keyed and new request-keyed copies.</li>
+  <li><strong>Internal <span class="inline_code">x-http2-*</span> headers</strong> (<span class="inline_code">x-http2-scheme</span>/<span class="inline_code">x-http2-stream-id</span> on a request, <span class="inline_code">x-http2-stream-weight</span> on a tunnelled response) are no longer leaked into recorded/matched/forwarded requests or responses. If an expectation or verification names one of these headers, remove it &mdash; it will no longer be present to match against.</li>
+  <li><strong>Log-level changes that can affect alerting:</strong> an HTTP/1.1 or HTTP/2 upload its client gives up on part way through the body now logs one <span class="inline_code">INFO</span> entry naming the stream/request, not an <span class="inline_code">ERROR</span> with a stack trace &mdash; an alert keyed on <span class="inline_code">ERROR</span> entries, or on that message, stops firing for this case, and nothing is logged for it at <span class="inline_code">WARN</span>/<span class="inline_code">ERROR</span> levels. Separately, some connection-reset warnings that Netty used to print outside MockServer's own log at <span class="inline_code">WARN</span> (an upstream resetting an idle pooled HTTP/2 connection, for example) now appear inside MockServer's log at <span class="inline_code">DEBUG</span>, so they no longer show at the default <span class="inline_code">INFO</span> level; set <span class="inline_code">logLevel=DEBUG</span> to see them.</li>
+  <li><strong>Java API:</strong> <span class="inline_code">NottableString.withStyle</span>/<span class="inline_code">withSchemaType</span> and <span class="inline_code">Parameter.withStyle</span> now return a new instance instead of mutating and returning <span class="inline_code">this</span> &mdash; code relying on the mutation (rather than using the return value) no longer sees the change.</li>
+  <li><strong>Event log timing:</strong> a log entry can now take up to 10 ms longer to reach the console, disk capture, or the dashboard, and disk capture now batches writes &mdash; a hard kill (not a graceful <span class="inline_code">stop()</span>) can lose up to 8 KB of not-yet-flushed disk-captured entries.</li>
+  <li><strong>Netty upgraded from 4.2.17.Final to 4.2.19.Final (bundled dependency), two visible changes:</strong> an HTTP/2 client whose <span class="inline_code">SETTINGS_INITIAL_WINDOW_SIZE</span> change would overflow a stream's flow-control window now has its whole <strong>connection</strong> closed with <span class="inline_code">FLOW_CONTROL_ERROR</span> (RFC 9113), where before only that one stream was reset; and in a <span class="inline_code">multipart/form-data</span> request, a file part whose declared <span class="inline_code">Content-Type</span> is not a plausible media type (for example <span class="inline_code">text</span>) is now read as <span class="inline_code">application/octet-stream</span> &mdash; a <span class="inline_code">partContentTypes</span> matcher for such a part must now name <span class="inline_code">application/octet-stream</span> instead of the part's declared type.</li>
+  <li><strong>Windows binary launchers</strong> (each client's launcher that runs the downloaded <span class="inline_code">mockserver.bat</span>, not a JVM started directly): hardened against characters <span class="inline_code">cmd.exe</span> would otherwise read as commands rather than text, in the launcher path or in extra launch arguments.
+    <ul>
+      <li><strong>Node:</strong> no longer starts MockServer through a shell at all (on Windows this previously ran <span class="inline_code">mockserver.bat</span> under <span class="inline_code">cmd.exe</span>, so <span class="inline_code">%NAME%</span> in an argument, or in the cache directory path, was expanded as an environment variable, and a line break could end the command early). A <span class="inline_code">spawnOptions.shell</span> option is now ignored. <span class="inline_code">MOCKSERVER_JAVA_OPTS</span> is now split on whitespace with quoted text kept together on every OS.</li>
+      <li><strong>Python:</strong> <span class="inline_code">start()</span> now quotes every argument itself instead of running with <span class="inline_code">shell=True</span>, and raises <span class="inline_code">ValueError</span> if the launcher path or an <span class="inline_code">extra_args</span> entry contains a double quote, a line break or NUL, or if together they contain more than one <span class="inline_code">%</span>.</li>
+      <li><strong>Ruby:</strong> builds the <span class="inline_code">cmd.exe</span> command line itself instead of relying on Ruby's own quoting, and raises <span class="inline_code">MockServer::Error</span> for the same character set (<span class="inline_code">"</span>, <span class="inline_code">&lt;</span>, <span class="inline_code">&gt;</span>, <span class="inline_code">|</span>, <span class="inline_code">&amp;</span>, a line break, NUL, or more than one <span class="inline_code">%</span>) in the launcher path or <span class="inline_code">extra_args</span>. Needs a native Ruby (mswin or mingw, such as RubyInstaller) on Windows.</li>
+      <li><strong>PHP:</strong> builds the <span class="inline_code">cmd.exe</span> command line itself and throws <span class="inline_code">BinaryInstallException</span> for the same cases in the launcher path or an extra argument.</li>
+      <li><strong>Go, Rust and .NET:</strong> each now quotes the launcher path itself before passing it to <span class="inline_code">cmd.exe</span>, and refuses a launcher path containing a double quote, a line break or NUL, or more than one <span class="inline_code">%</span>.</li>
+    </ul>
+  </li>
+</ul>
+
+<a id="later_9x_changes" class="anchor" href="#later_9x_changes">&nbsp;</a>
+
+<h2>Changes in later 9.x releases</h2>
+
+<a id="browser_origins" class="anchor" href="#browser_origins">&nbsp;</a>
+
+<h3>Only trusted web pages can use MockServer's own API from a browser</h3>
+
+<p>From 7.0.0 to 9.0.0, MockServer's own API (every <span class="inline_code">/mockserver/...</span> path), the dashboard's live log and the callback WebSocket answered every web page, so any site open in your browser could read recorded traffic from, or change, a MockServer running on your machine. A new property, <span class="inline_code">controlPlaneCorsAllowOrigin</span>, now decides which pages they answer. Left blank (the default), they only answer:</p>
+
+<ul>
+  <li>pages on <span class="inline_code">localhost</span>, <span class="inline_code">127.0.0.1</span> or <span class="inline_code">[::1]</span>, on any port, over http or https, and</li>
+  <li>pages MockServer serves itself, such as the dashboard, at the same host and port, when you reach MockServer by <span class="inline_code">localhost</span>, an IP address, a single-word name such as a Docker or Compose service name (<span class="inline_code">mockserver</span>), a Kubernetes service name ending in <span class="inline_code">.svc</span> or <span class="inline_code">.svc.cluster.local</span>, or a name ending in <span class="inline_code">.internal</span>, such as <span class="inline_code">host.docker.internal</span> or an AWS <span class="inline_code">ec2.internal</span> name.</li>
+</ul>
+
+<p>The second rule is limited to those names to stop DNS rebinding by a web site, where a malicious site points its own name at MockServer so that its page looks like one MockServer served: a page from <span class="inline_code">http://evil.example.com:1080</span> sent with <span class="inline_code">Host: evil.example.com:1080</span> is refused. A page MockServer serves at any other name, for example <span class="inline_code">https://mockserver.example.com</span>, is trusted only if you list its origin in <span class="inline_code">controlPlaneCorsAllowOrigin</span>, or its name ends in a suffix you list in the new <span class="inline_code">controlPlaneTrustedHostSuffixes</span> property (for example <span class="inline_code">corp.example</span>, for a Kubernetes cluster with a custom domain). This is so even when <span class="inline_code">controlPlaneCorsAllowOrigin</span> is set: listing some origins does not make other names trusted. Either one trusts that name, so only list names public DNS cannot resolve, or turn on control-plane authentication. Someone who controls your machine's name lookups (a hostile Wi-Fi network, a spoofing machine on the local network, your cluster's DNS) can still rebind any of these names except an IP address or <span class="inline_code">localhost</span>; turn on control-plane authentication if that is a risk for you. <span class="inline_code">controlPlaneTrustedHostSuffixes</span> can also only be set at startup.</p>
+
+<p>A request MockServer's own API serves &mdash; any <span class="inline_code">/mockserver/...</span> path, a legacy path such as <span class="inline_code">/reset</span> or <span class="inline_code">/expectation</span> with a method the API serves there, the liveness path, or a dashboard or callback WebSocket &mdash; that comes from any other page is refused with <span class="inline_code">403</span>, whatever its method, before it is handled and before any expectation can answer it. <span class="inline_code">Origin: null</span> (a sandboxed iframe, or a page opened from a file) is refused too. The browser's preflight for such a request is answered without CORS headers. Clients that are not browsers, such as curl and the client libraries, send no <span class="inline_code">Origin</span> and are not affected.</p>
+
+<p><span class="inline_code">controlPlaneCorsAllowOrigin</span> can only be set at startup (system property, environment variable, properties file or <span class="inline_code">Configuration</span>); <span class="inline_code">PUT /mockserver/configuration</span> ignores it and logs a warning.</p>
+
+<p><span class="inline_code">corsAllowOrigin</span> no longer affects MockServer's own API. It, and <span class="inline_code">enableCORSForAllResponses</span>, still apply to mocked and proxied responses as before, with these differences:</p>
+<ul>
+  <li>a preflight for a request MockServer's own API serves (a legacy path such as <span class="inline_code">/reset</span> or <span class="inline_code">/graphql</span> counts only with a method the API serves there, <span class="inline_code">PUT</span> for most) is answered by MockServer under <span class="inline_code">controlPlaneCorsAllowOrigin</span>, not by an <span class="inline_code">OPTIONS</span> expectation or <span class="inline_code">corsAllowOrigin</span>;</li>
+  <li>a <span class="inline_code">respondBeforeBody</span> expectation no longer answers a request MockServer's own API serves;</li>
+  <li>a browser request from a page that <span class="inline_code">controlPlaneCorsAllowOrigin</span> does not allow is refused with <span class="inline_code">403</span> even where a mock, not the control plane, would have answered it, for these requests: <span class="inline_code">GET</span> or <span class="inline_code">DELETE</span> on <span class="inline_code">/loadScenario/start</span> or <span class="inline_code">/loadScenario/stop</span>; <span class="inline_code">PUT /pact</span>; <span class="inline_code">GET</span> or <span class="inline_code">DELETE</span> on any deeper path under <span class="inline_code">/loadScenario/&lt;name&gt;/</span> other than <span class="inline_code">GET /loadScenario/&lt;name&gt;/report</span>; <span class="inline_code">GET</span>, <span class="inline_code">PUT</span> or <span class="inline_code">DELETE</span> under <span class="inline_code">/chaosExperiment/profiles/&lt;name&gt;/</span>; <span class="inline_code">POST</span> under <span class="inline_code">/chaosExperiment/apply/&lt;name&gt;/</span>; and any method on a <span class="inline_code">/mockserver</span> or <span class="inline_code">/_mockserver_</span> path that is not a route;</li>
+  <li>an unmatched preflight for another method on a legacy path, for example <span class="inline_code">POST /graphql</span> to a mocked GraphQL API, allows only the requested method in <span class="inline_code">Access-Control-Allow-Methods</span>.</li>
+</ul>
+<p>Preflights for mocked paths also no longer carry the stray <span class="inline_code">deprecated</span> header.</p>
+
+<p><strong>Who needs to act:</strong></p>
+<ul>
+  <li>anyone whose browser page on another host calls MockServer's API, for example a front-end on <span class="inline_code">https://app.example.com</span> or a browser test served from a CI host name;</li>
+  <li>anyone who points the dashboard at a MockServer on another host, or opens it through a reverse proxy or ingress that changes the <span class="inline_code">Host</span> header;</li>
+  <li>anyone who opens the dashboard at a name with a dot in it that is not a <span class="inline_code">.svc</span>, <span class="inline_code">.svc.cluster.local</span> or <span class="inline_code">.internal</span> name, for example <span class="inline_code">https://mockserver.example.com</span>: list that address in <span class="inline_code">controlPlaneCorsAllowOrigin</span> (even if it already lists other origins), or add a private suffix such as <span class="inline_code">corp.example</span> to <span class="inline_code">controlPlaneTrustedHostSuffixes</span>;</li>
+  <li>anyone who set <span class="inline_code">corsAllowOrigin</span> so that a page could call MockServer's API;</li>
+  <li>anyone running a Java client older than this release behind a proxy that changes the <span class="inline_code">Host</span> header: older Java clients send an <span class="inline_code">Origin</span> header on their callback and breakpoint WebSockets, built from the address they connect to. Upgrade the client, or add that address (for example <span class="inline_code">http://mockserver-proxy:1080</span>) to <span class="inline_code">controlPlaneCorsAllowOrigin</span>.</li>
+</ul>
+
+<p>Set <span class="inline_code">controlPlaneCorsAllowOrigin</span> on that MockServer to the page's origin, or a comma-separated list of origins:</p>
+
+<pre class="prettyprint code"><code class="code">-Dmockserver.controlPlaneCorsAllowOrigin=https://app.example.com
+# or, in Docker
+-e MOCKSERVER_CONTROL_PLANE_CORS_ALLOW_ORIGIN=https://app.example.com</code></pre>
+
+<p>The same release makes the callback WebSocket require control-plane authentication when it is turned on, as the dashboard's WebSocket already did. The Java, Node, Python, Go, Rust and .NET clients of this release send their bearer token on it, and with mTLS authentication the Java, Node, Python, Go, Rust and .NET clients present their client certificate on it, so upgrade them with the server; a browser cannot send a token, so the Node client's browser build and the dashboard need mTLS for callbacks and breakpoints when JWT or OIDC authentication is on. A second connection that registers with a client id already in use takes over at once from the same authenticated caller, and otherwise only from a connection that no longer answers a ping within 2 seconds; while the old connection answers, it is refused with <span class="inline_code">403</span> (a different authenticated caller) or <span class="inline_code">409</span>. See <a href="/mock_server/CORS_support.html#browser_origins">CORS</a>.</p>
+
+<a id="block_private_networks_startup_only" class="anchor" href="#block_private_networks_startup_only">&nbsp;</a>
+
+<h3>forwardProxyBlockPrivateNetworks can only be set at startup</h3>
+
+<p><span class="inline_code">forwardProxyBlockPrivateNetworks</span> stops forward actions, the proxy, replays and webhooks reaching loopback, private-network and cloud-metadata addresses. Up to 9.1.0, <span class="inline_code">PUT /mockserver/configuration</span> could switch it off on a running server, so anyone who could reach the control plane could turn that protection off. It is now fixed at startup, like <span class="inline_code">forwardProxyAllowedHosts</span> and <span class="inline_code">forwardProxyDeniedHosts</span>: a <span class="inline_code">PUT</span> that sets a different value is still answered, but the value is ignored and a warning is logged. A <span class="inline_code">PUT</span> that sends the value already in force, such as one that sends back the whole configuration, logs nothing.</p>
+
+<p><strong>To fix:</strong> if you turned it on or off at runtime, set it before the server starts instead:</p>
+
+<pre class="prettyprint code"><code class="code">-Dmockserver.forwardProxyBlockPrivateNetworks=true
+# or, in Docker
+-e MOCKSERVER_FORWARD_PROXY_BLOCK_PRIVATE_NETWORKS=true</code></pre>
+
+<a id="write_paths_startup_only" class="anchor" href="#write_paths_startup_only">&nbsp;</a>
+
+<h3>File paths MockServer writes to can only be set at startup</h3>
+
+<p><span class="inline_code">auditLogFile</span>, <span class="inline_code">persistedExpectationsPath</span>, <span class="inline_code">persistedRecordedExpectationsPath</span>, <span class="inline_code">persistedRecordedRequestsPath</span>, <span class="inline_code">memoryUsageCsvDirectory</span> and <span class="inline_code">directoryToSaveDynamicSSLCertificate</span> decide where MockServer writes files. Up to 9.1.0, <span class="inline_code">PUT /mockserver/configuration</span> could change them on a running server, so anyone who could reach the control plane could, for example, send the audit log, or the generated certificates and their private keys, to another directory. <span class="inline_code">persistedRecordedRequestsPath</span> also sets which file a <span class="inline_code">format=recording</span> import from disk reads, so a <span class="inline_code">PUT</span> could point that import at another file. <span class="inline_code">grpcProtocPath</span>, which names the <span class="inline_code">protoc</span> program MockServer runs, is now fixed at startup too. They are now fixed at startup, like <span class="inline_code">recordedBodyFilesDirectory</span>: a <span class="inline_code">PUT</span> that sets a different value is still answered, but the value is ignored and a warning is logged. A <span class="inline_code">PUT</span> that sends the value already in force, such as one that sends back the whole configuration, logs nothing. Most of these paths were already only used when the server started, so for them the change only stops <span class="inline_code">GET /mockserver/configuration</span> reporting a path the server was not using.</p>
+
+<p><strong>To fix:</strong> if you set them at runtime, set them before the server starts instead:</p>
+
+<pre class="prettyprint code"><code class="code">-Dmockserver.auditLogFile=/var/log/mockserver/audit.ndjson
+# or, in Docker
+-e MOCKSERVER_AUDIT_LOG_FILE=/var/log/mockserver/audit.ndjson</code></pre>
+
+<a id="control_plane_trust_startup_only" class="anchor" href="#control_plane_trust_startup_only">&nbsp;</a>
+
+<h3>Control-plane authentication, authorization, auditing and the dashboard analytics endpoint can only be set at startup</h3>
+
+<p>Up to 9.1.0, <span class="inline_code">PUT /mockserver/configuration</span> could change these settings on a running server, so anyone allowed to change MockServer's configuration could weaken its security: switch control-plane authentication off, trust their own keys or identity provider, give themselves a role, switch the audit log off before making changes, or make every dashboard viewer's browser send events to their own server. They are now fixed at startup, like the <span class="inline_code">controlPlaneBasicAuthentication*</span> settings:</p>
+
+<ul>
+    <li>control-plane mTLS: <span class="inline_code">controlPlaneTLSMutualAuthenticationRequired</span> and <span class="inline_code">controlPlaneTLSMutualAuthenticationCAChain</span>;</li>
+    <li>control-plane JWT: <span class="inline_code">controlPlaneJWTAuthenticationRequired</span>, <span class="inline_code">controlPlaneJWTAuthenticationJWKSource</span>, <span class="inline_code">controlPlaneJWTAuthenticationExpectedAudience</span>, <span class="inline_code">controlPlaneJWTAuthenticationMatchingClaims</span> and <span class="inline_code">controlPlaneJWTAuthenticationRequiredClaims</span>;</li>
+    <li>control-plane OIDC: <span class="inline_code">controlPlaneOidcAuthenticationRequired</span>, <span class="inline_code">controlPlaneOidcIssuer</span>, <span class="inline_code">controlPlaneOidcJwksUri</span>, <span class="inline_code">controlPlaneOidcAudience</span>, <span class="inline_code">controlPlaneOidcRequiredScopes</span> and <span class="inline_code">controlPlaneOidcScopeClaim</span>;</li>
+    <li>authorization: <span class="inline_code">controlPlaneAuthorizationEnabled</span> and <span class="inline_code">controlPlaneScopeMapping</span>;</li>
+    <li><span class="inline_code">controlPlaneAuditEnabled</span> and <span class="inline_code">dashboardAnalyticsEndpoint</span>.</li>
+</ul>
+
+<p>A <span class="inline_code">PUT</span> that sets a different value is still answered, but the value is ignored, a warning is logged and <span class="inline_code">GET /mockserver/configuration</span> reports the value in force. A <span class="inline_code">PUT</span> that sends the value already in force, such as one that sends back the whole configuration, logs nothing. The dashboard's Audit Trail view no longer has a switch for the audit log; it shows whether it is on. <span class="inline_code">controlPlaneAuditReads</span> and <span class="inline_code">controlPlaneAuditMaxEntries</span> can still be changed at runtime.</p>
+
+<p><strong>To fix:</strong> if you set them at runtime, set them before the server starts instead:</p>
+
+<pre class="prettyprint code"><code class="code">-Dmockserver.controlPlaneAuditEnabled=true
+# or, in Docker
+-e MOCKSERVER_CONTROL_PLANE_AUDIT_ENABLED=true</code></pre>
+
+<a id="no_proxy_hosts_startup_only" class="anchor" href="#no_proxy_hosts_startup_only">&nbsp;</a>
+
+<h3>noProxyHosts can only be set at startup</h3>
+
+<p><span class="inline_code">noProxyHosts</span> lists the hosts MockServer connects to directly instead of through <span class="inline_code">forwardHttpProxy</span>, <span class="inline_code">forwardHttpsProxy</span> or <span class="inline_code">forwardSocksProxy</span>. MockServer reads those upstream proxies only when it starts, but up to 9.1.0 <span class="inline_code">PUT /mockserver/configuration</span> could change <span class="inline_code">noProxyHosts</span> on a running server, so anyone allowed to change MockServer's configuration could route forwarded traffic around an upstream proxy you rely on, for example for logging or data-loss checks. It is now fixed at startup: a <span class="inline_code">PUT</span> that sets a different value is still answered, but the value is ignored, a warning is logged and <span class="inline_code">GET /mockserver/configuration</span> reports the value in force. A <span class="inline_code">PUT</span> that sends the value already in force, such as one that sends back the whole configuration, logs nothing.</p>
+
+<p><strong>To fix:</strong> if you set it at runtime, set it before the server starts instead:</p>
+
+<pre class="prettyprint code"><code class="code">-Dmockserver.noProxyHosts="*.internal.corp,localhost"
+# or, in Docker
+-e MOCKSERVER_NO_PROXY_HOSTS="*.internal.corp,localhost"</code></pre>
+
+<a id="llm_base_url_clears_key" class="anchor" href="#llm_base_url_clears_key">&nbsp;</a>
+
+<h3>Changing llmBaseUrl at runtime clears llmApiKey</h3>
+
+<p><span class="inline_code">llmBaseUrl</span> can still be changed with <span class="inline_code">PUT /mockserver/configuration</span>, but up to 9.1.0 the key set earlier was then sent to the new endpoint, so anyone allowed to change MockServer's configuration could collect the LLM API key by pointing <span class="inline_code">llmBaseUrl</span> at their own server. Now a <span class="inline_code">PUT</span> that changes where the default LLM backend sends requests &mdash; a different <span class="inline_code">llmBaseUrl</span>, or a different <span class="inline_code">llmProvider</span> while <span class="inline_code">llmBaseUrl</span> is empty &mdash; without also supplying <span class="inline_code">llmApiKey</span> clears the key and logs a warning. The <span class="inline_code">***REDACTED***</span> value a <span class="inline_code">GET</span> returns does not count as supplying it. A <span class="inline_code">PUT</span> that supplies both applies both. Likewise, a JSON <span class="inline_code">llmBackendsConfig</span> value in which a backend's <span class="inline_code">baseUrl</span> or <span class="inline_code">provider</span> changes while its key is left masked is not applied, and a warning is logged.</p>
+
+<p><strong>To fix:</strong> send the key in the same request as the new endpoint:</p>
+
+<pre class="prettyprint code"><code class="code">curl -X PUT http://localhost:1080/mockserver/configuration \
+  -d '{"llmBaseUrl": "https://gateway.example.com", "llmApiKey": "sk-..."}'</code></pre>
+
+<a id="fan_in_peers_startup_only" class="anchor" href="#fan_in_peers_startup_only">&nbsp;</a>
+
+<h3>Cluster fan-in peers and token can only be set at startup</h3>
+
+<p>With cluster verify/retrieve fan-in, each node sends <span class="inline_code">clusterFanInPeerAuthToken</span> to every node listed in <span class="inline_code">clusterVerifyFanInPeers</span>. Up to 9.1.0, <span class="inline_code">PUT /mockserver/configuration</span> could change that list on a running server, so anyone who could reach the control plane could add a host of its own and collect the token, which grants write access to every node. Both settings are now fixed at startup: a <span class="inline_code">PUT</span> that sets a different value is still answered, but the value is ignored and a warning is logged (the warning never shows the token). A <span class="inline_code">PUT</span> that sends the value already in force logs nothing. The token was already only read when the server started, so for it the change only stops a <span class="inline_code">PUT</span> appearing to work.</p>
+
+<p><strong>To fix:</strong> if you set them at runtime, set them before the server starts instead:</p>
+
+<pre class="prettyprint code"><code class="code">-Dmockserver.clusterVerifyFanInPeers=http://mockserver-1:1080,http://mockserver-2:1080
+# or, in Docker
+-e MOCKSERVER_CLUSTER_VERIFY_FAN_IN_PEERS=http://mockserver-1:1080,http://mockserver-2:1080</code></pre>
+
+<a id="kafka_sasl_startup_only" class="anchor" href="#kafka_sasl_startup_only">&nbsp;</a>
+
+<h3>Kafka SASL login and bootstrap servers can only be set at startup</h3>
+
+<p>Up to 9.1.0, a <span class="inline_code">PUT /mockserver/asyncapi</span> request could send its own Kafka SASL login in <span class="inline_code">brokerConfig.kafkaSecurity.saslJaasConfig</span>. A JAAS configuration names a Java class for the Kafka client to load, so anyone who could reach MockServer's API could choose code to run inside MockServer. That field, and any other <span class="inline_code">kafkaSecurity</span> field MockServer does not know, is now rejected with a <span class="inline_code">400</span>. The login is set once, when MockServer starts, with <a href="/mock_server/configuration_properties.html#button_configuration_async_kafka_sasl_jaas_config"><span class="inline_code">asyncKafkaSaslJaasConfig</span></a>; <span class="inline_code">PUT /mockserver/configuration</span> ignores it with a warning.</p>
+
+<p>Because the login is now held by MockServer (in that property, or in the JVM's own JAAS file), it must only go to brokers you chose. A request whose <span class="inline_code">securityProtocol</span> is <span class="inline_code">SASL_PLAINTEXT</span> or <span class="inline_code">SASL_SSL</span> must leave out <span class="inline_code">kafkaBootstrapServers</span> or name the same brokers as <a href="/mock_server/configuration_properties.html#button_configuration_async_kafka_bootstrap_servers"><span class="inline_code">asyncKafkaBootstrapServers</span></a> (in any order). Otherwise, or if <span class="inline_code">asyncKafkaBootstrapServers</span> is not set, it gets a <span class="inline_code">400</span> and nothing is sent. <span class="inline_code">asyncKafkaBootstrapServers</span> can now only be set at startup: a <span class="inline_code">PUT /mockserver/configuration</span> that sets a different value is ignored and a warning is logged. <span class="inline_code">PLAINTEXT</span> and <span class="inline_code">SSL</span> requests can still name any brokers.</p>
+
+<p><strong>To fix:</strong> set both before the server starts, and keep <span class="inline_code">securityProtocol</span> and <span class="inline_code">saslMechanism</span> in the request:</p>
+
+<pre class="prettyprint code"><code class="code">-e MOCKSERVER_ASYNC_KAFKA_BOOTSTRAP_SERVERS=broker:9093 \
+-e MOCKSERVER_ASYNC_KAFKA_SASL_JAAS_CONFIG='org.apache.kafka.common.security.plain.PlainLoginModule required username="user" password="pass";'</code></pre>
+
+<a id="forward_unmatched_to_needs_mutate" class="anchor" href="#forward_unmatched_to_needs_mutate">&nbsp;</a>
+
+<h3>retrieve with forwardUnmatchedTo needs a role that may change state</h3>
+
+<p><span class="inline_code">retrieve?type=RECORDED_EXPECTATIONS&amp;forwardUnmatchedTo=&lt;upstream&gt;</span> changes where the server forwards unmatched requests, but control-plane authorization treated it as a read. With <span class="inline_code">controlPlaneAuthorizationEnabled</span>, a principal with only the <span class="inline_code">READ</span> role is now refused with <span class="inline_code">403</span> when it sends <span class="inline_code">forwardUnmatchedTo</span>; it needs the <span class="inline_code">MUTATE</span> role, as <span class="inline_code">extractBodiesLargerThan</span> already did. A <span class="inline_code">retrieve</span> without that parameter is still a read. Without control-plane authorization, nothing changes. See <a href="/mock_server/control_plane_authorisation.html">Control Plane Authorisation</a>.</p>
+
+<a id="war_mtls_enforced" class="anchor" href="#war_mtls_enforced">&nbsp;</a>
+
+<h3>A WAR enforces tlsMutualAuthenticationRequired on mocked requests</h3>
+
+<p>A WAR deployment (<span class="inline_code">mockserver-war</span> or <span class="inline_code">mockserver-proxy-war</span>) used to ignore <span class="inline_code">tlsMutualAuthenticationRequired</span> and served mocks over plain HTTP, and over HTTPS without a client certificate. With it set, a mocked request over plain HTTP now gets <span class="inline_code">426 Upgrade Required</span>, and one over HTTPS without a client certificate verified by the servlet container gets <span class="inline_code">401</span>. The servlet container's trust store decides which client certificates are accepted. To keep serving mocks, configure the container for HTTPS with client-certificate verification, or unset <span class="inline_code">tlsMutualAuthenticationRequired</span>.</p>
+
+<a id="see_also" class="anchor" href="#see_also">&nbsp;</a>
+
+<h2>See also</h2>
+
+<ul>
+  <li><a href="https://github.com/mock-server/mockserver-monorepo/blob/master/changelog.md" target="_blank" rel="noopener noreferrer">Full changelog</a> &mdash; every change in 9.0.0, not only the breaking ones</li>
+  <li><a href="/mock_server/configuration_properties.html">Configuration Properties</a></li>
+  <li><a href="/mock_server/getting_started.html">Getting Started</a></li>
+  <li><a href="/mock_server/debugging_issues.html">Logging &amp; Debugging</a></li>
+</ul>

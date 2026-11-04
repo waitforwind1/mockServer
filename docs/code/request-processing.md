@@ -1,0 +1,2096 @@
+# Request Processing, Mocking & Proxying
+
+## How Mocking and Proxying Work Together
+
+MockServer operates in two modes simultaneously on every request:
+
+1. **Mock mode**: Matches incoming requests against registered expectations and returns configured responses
+2. **Proxy mode**: Forwards unmatched requests to their original destination (when the channel has `PROXYING=true`)
+
+The decision is made per-request in `HttpActionHandler.processAction()`:
+
+```mermaid
+flowchart TD
+    REQ([Incoming HTTP Request]) --> MCP_CHK{"MCP request?\n/mockserver/mcp"}
+    MCP_CHK -->|Yes| MCP["McpStreamableHttpHandler\nJSON-RPC 2.0 over HTTP"]
+    MCP_CHK -->|No| LOG_RX["Log RECEIVED_REQUEST\nvia Disruptor"]
+    LOG_RX --> MATCH[RequestMatchers.firstMatchingExpectation]
+
+    MATCH -->|Expectation found| DISPATCH["Dispatch to Action Handler
+based on Action.Type"]
+    MATCH -->|No match| PROXY{"Channel in
+proxy mode?"}
+
+    PROXY -->|Yes| LOOP{"Loop
+detected?"}
+    LOOP -->|No| AUTH{"Proxy auth
+required?"}
+    AUTH -->|Pass| FWD[Forward via NettyHttpClient]
+    AUTH -->|Fail| R407[407 Proxy Auth Required]
+    LOOP -->|Yes| R404A[404 + loop warning]
+    PROXY -->|No| STATIC{"staticFilesDirectory
+serves the file?"}
+    STATIC -->|Yes| SF[Static file response]
+    STATIC -->|No| R404[404 Not Found]
+
+    DISPATCH --> RESP[HttpResponseActionHandler]
+    DISPATCH --> TMPL_R[HttpResponseTemplateActionHandler]
+    DISPATCH --> CLASS_R[HttpResponseClassCallbackActionHandler]
+    DISPATCH --> OBJ_R[HttpResponseObjectCallbackActionHandler]
+    DISPATCH --> SSE[HttpSseResponseActionHandler]
+    DISPATCH --> WS[HttpWebSocketResponseActionHandler]
+    DISPATCH --> FWD_S[HttpForwardActionHandler]
+    DISPATCH --> TMPL_F[HttpForwardTemplateActionHandler]
+    DISPATCH --> CLASS_F[HttpForwardClassCallbackActionHandler]
+    DISPATCH --> OBJ_F[HttpForwardObjectCallbackActionHandler]
+    DISPATCH --> OVERRIDE[HttpOverrideForwardedRequestActionHandler]
+    DISPATCH --> FWDVAL[HttpForwardValidateActionHandler]
+    DISPATCH --> FWDFB[HttpForwardWithFallbackActionHandler]
+    DISPATCH --> GRPC[GrpcStreamResponseActionHandler]
+    DISPATCH --> LLM[HttpLlmResponseActionHandler]
+    DISPATCH --> ERR[HttpErrorActionHandler]
+
+    RESP --> LOG_RESP[Log EXPECTATION_RESPONSE]
+    FWD_S --> LOG_FWD[Log FORWARDED_REQUEST]
+    FWD --> LOG_FWD
+    R404 --> LOG_NO[Log NO_MATCH_RESPONSE]
+    SF --> LOG_RESP
+
+    LOG_RESP --> WRITE[Write response to channel]
+    LOG_FWD --> WRITE
+    LOG_NO --> WRITE
+```
+
+### Extension request filter (H1) at the top of `processAction`
+
+**Outcome.** With an extension `RequestFilter` loaded (see [extensions.md](extensions.md#request-filter-and-response-transformer-h1-h2)), `processAction` hands every request it does not answer as a control-plane route preflight to `RequestFilterStage`, which runs the filter chain on the extension pool and then runs the rest of `processAction` (`processActionAfterFilter`) with the request the filters let through. With none loaded, the only cost is one null check of the `final` field `HttpActionHandler.dataPlaneHooks`; nothing new is allocated or loaded (`DataPlaneHooksAbsentCostTest`, `NettyDataPlaneHooksAbsentCostTest`, `ExtensionClassLoadingTest`). **Status:** wired for every transport that calls `processAction`; verified on Netty HTTP/1.1 and HTTP/2 (unit DP2), and on HTTP/3 (plain and gRPC), both servlets and in-process (unit DP3).
+
+```mermaid
+sequenceDiagram
+    participant L as "Event loop"
+    participant P as "Extension pool"
+    L->>L: processAction: dataPlaneHooks != null
+    L->>L: control-plane route preflight? answer it, no filter
+    L->>L: markDataPlane() on the writer
+    L->>P: filter chain (one slot, one budget)
+    P-->>P: slot released
+    alt proceed
+        P->>L: ctx.executor().execute(continuation)
+        L->>L: processActionAfterFilter inside catch-and-answer
+    else respond()
+        P->>P: RECEIVED_REQUEST, EXPECTATION_RESPONSE, write
+    else failure (500, 503)
+        P->>P: RECEIVED_REQUEST (original), failUnanswered
+    end
+```
+
+| Aspect | Behaviour |
+|---|---|
+| Which requests | With no request filter loaded (only response transformers), none: `processAction` continues at once, on the same thread. Otherwise everything that reaches `processAction` except a CORS preflight for a control-plane route, including an unserved `/mockserver/x` that reaches matching and a data-plane CORS preflight (`FilterContext.isCorsPreflight()`). Never a request refused before it: data-plane auth `401`, mTLS `426`, cordon `503`, and never a control-plane request (`HttpState.handle` serves those first) |
+| Threads | The chain runs on `MockServer-ext-dataplane-N`, never on an event loop. A caller with a channel (HTTP/1.1, HTTP/2, an HTTP/3 stream) continues on `ctx.executor()`; a waiting caller (servlet, `InProcessMockServer.handle`) waits for the chain for at most what is left of the budget (`Future.get`) and continues on its own thread; `InProcessMockServer.handleAsync` continues on the scheduler, or on the completing thread once the scheduler is shut down, since a shut-down scheduler silently drops a task |
+| Catch-and-answer | On a channel the continuation runs in a `try` catching `Throwable`, and a `RejectedExecutionException` from a stopping loop is handled the same way: the fault is logged at `ERROR` with a correlation id and the exchange answered with `dataPlaneFailureResponse` (`500`) through `TransformingWriter.failUnanswered`, which writes nothing if a response already claimed it. The HTTP/3 writers are not transforming writers until the response transformers reach HTTP/3, so there the `500` is written without a claim; on gRPC the writer's `completed` CAS still drops a second terminal write |
+| Writes | A filter's `respond()` and a failure response are written from the thread that completed the chain, after its slot is released. `respond()` is marked generated and goes through `writeResponse`, so the response transformers see it with `isGenerated()`; a failure response goes through `writeUntransformed`, never a transformer |
+| Copies | Each filter gets `DataPlaneCopies.copyForFilter` (a deep copy). `proceedWith(r)` is accepted as `acceptFilteredRequest(r, input, received)`: a fresh copy with the transport's fields re-stamped and the body as received kept only if the body is unchanged. A result equal to its input by value is dropped for the input, so an identity filter leaves the very request the transport built. `respond(r)` is accepted as a fresh copy. A result that cannot be copied (a custom `Body` without `copy()`) is a `threw` failure of that filter |
+| Contract | Moving a request under `/mockserver/` or `/_mockserver_`, changing a gRPC request's path or `x-grpc-service` / `x-grpc-method` (`isGrpc()` is true when the request carries `x-grpc-service`), or answering with `respond()` and a `1xx` status (it would leave the exchange with no final response) is a `contract_violation`: `500` and a `WARN`, and nothing reaches the control plane |
+| gRPC deadline | The `grpc-timeout` deadline is scheduled when the gRPC request is converted, before the filter. If it fires while the filter runs, `DEADLINE_EXCEEDED` ends the stream. On multiplexed HTTP/2 the stream is then closed, so the response matching writes later goes nowhere (`GrpcRequestFilterIntegrationTest`). HTTP/3 claims the stream for the deadline with the existing `completed` CAS in `Http3GrpcResponseWriter`, which drops the late response; with a hook loaded the writer is `TransformingHttp3GrpcResponseWriter`, the deadline also claims the `TransformingWrites` exchange, and the late response is dropped there with a WARN and a `dropped_writes{reason=after_failure}` count (`Http3RequestFilterIntegrationTest`, [http3.md](http3.md#extension-response-transformers)). On a connection-level pipeline (gRPC-Web over HTTP/1.1) the existing `consumeDeadlineExceeded` drop in `GrpcToHttpResponseHandler.write` discards it, as it does a `Delay` that outlasts the deadline; that path has no test with a filter loaded |
+
+**Event log.** `RECEIVED_REQUEST` is logged exactly once: by `processActionAfterFilter` with the filtered request; on a failure (throw, timeout, `null`, contract violation, no slot, stopping) by the stage with the request as received; on `respond()` with the input of the filter that answered, followed by `EXPECTATION_RESPONSE` ("returning response ... returned by request filter: name", no expectation id). A filter whose result changed the request adds one `INFO` entry, "request filtered by: name", carrying the request as received; an unchanged result adds nothing. Each hook failure adds one `WARN` (`DataPlaneHooks.recordFailure`).
+
+**Exchange integrity on Netty HTTP/1.1 and HTTP/2.** `HttpRequestHandler` builds `DataPlaneWriters.netty` (a `TransformingNettyResponseWriter`, returned as `NettyResponseWriter`) only when hooks are loaded, and marks the exchange as data-plane (`markDataPlane(request)`) before `processAction`; `RequestFilterStage` marks it too, for transports that do not. From then on the first final (`>= 200`) write of any kind claims the exchange, following `TransformingWrites` (see [netty-pipeline.md](netty-pipeline.md)); a later final write is dropped with a `WARN` and `mock_server_extension_dataplane_dropped_writes{reason}` (`after_failure` or `duplicate`). `1xx` responses never claim, and a direct response announced by `respondingDirectly()` does not either. So a write the continuation scheduled before it threw cannot pair with the next pipelined request, and a pending filter keeps its exchange outstanding at `Http1PipeliningGate`, so pipelined responses stay in order. `RequestFilterIntegrationTest`, `TransformingNettyResponseWriterAfterFailureTest` and `NettyDataPlaneDifferentialCorpusWithIdentityFilterIntegrationTest` (the whole HTTP/1.1 and HTTP/2 corpus, byte for byte, with two identity filters loaded) pin this.
+
+### What runs after a response is handed to the writer
+
+**Outcome.** With a response transformer loaded on Netty, HTTP/3 and `InProcessMockServer.handleAsync`, `writeResponse` returns once the response has its place in the write order; the transformer chain and the write itself finish later, on the extension pool. The servlets and `InProcessMockServer.handle` instead wait on the caller (`waitOnCaller`), which is stricter. Every statement that follows a `writeResponse` call in `HttpActionHandler`, its callback handlers, `RequestFilterStage` and the transports has been classified against that: none needs the bytes to have reached the client, so all stay at the hand-off (design decision 12). One hazard was fixed inside `TransformingWrites`: an unchanged streamed response is written as a copy (below). `NettyDataPlaneDifferentialCorpusWithSlowNoOpTransformerIntegrationTest` pins it by replaying the whole HTTP/1.1 and HTTP/2 corpus with a transformer that waits before returning what it was given.
+
+| What follows the write | Where | Why it is safe at the hand-off |
+|---|---|---|
+| `return`, `break`, end of method | most sites | nothing runs |
+| `postProcessor.run()` / `expectationPostProcessor.run()` (`Times` and `responseInProgress`, after-actions, post-responder steps) | the response, forward, breakpoint, file-read overload and LLM cost-budget paths | It reads expectation state, not the response; the expectation is answered once the write is claimed. After-actions and webhooks may fire before the transformer finishes and see the response before it (decision 12) |
+| `emitRequestSpan(...)` | response funnel and its breakpoint continuation | It reads the request, the action and `getStatusCode()`, which the transport never changes. The span ends before the transformer runs, so its status is the one before it |
+| Event-log entry built after the write (proxy authentication `407`, a failed template's `WARN`) | `handleUnmatchedProxyForward`, `handleAnyException` | It holds the response by reference, as every entry built before a write does; what it records is the response before the transformer |
+| `streamingBody.addCompletionListener(...)` that clones the response for `FORWARDED_REQUEST` and runs `postProcessor` | four streamed-forward sites (unmatched proxy, its breakpoint continuation, proxy pass, `writeStreamingForwardActionResponse`) | The stream can finish before the transformer does, since a small upstream response can arrive whole in the head's read. The listener then clones the caller's response while the transport is adding CORS and `defaultResponseHeaders` on the pool thread, so `TransformingWrites.writeOutcome` writes `cloneWithHeaders()` of an unchanged streamed response. If the transformer fails, `closeUpstream()` errors the body, so the listener (and `postProcessor`) still runs |
+| A `catch` around the write that answers again (`handleUnmatchedForwardFailure`, `handleExceptionDuringForwardingRequest`, `handleAnyException`) | forward and response funnels | A throw from the transport now happens on the pool thread and is answered there with `dataPlaneFailureResponse`; a throw from code after the write reaches the `catch`, whose second final response is dropped as a duplicate |
+| Transport catch after `processAction` | `HttpRequestHandler`, `Http3MockServerHandler`, the servlets, `InProcessMockServer` | With a hook loaded, each uses `failUnanswered`, which writes nothing once a response has claimed the exchange. The servlets and `InProcessMockServer.handle` wait on the calling thread (`waitOnCaller`), so the write finishes before `service()` or `handle` returns, and the HTTP/3 catch reads `claimed \|\| started` (DP5; see [http3.md](http3.md#extension-response-transformers)) |
+
+**Generated responses.** Every response MockServer makes itself is marked with `markGenerated` (or written with `writeGenerated`) just before it is written, so a response transformer sees it with `TransformContext.isGenerated()`: the no-match `404`, overload `503`s (delayed or templated actions, static files, response files), breakpoint aborts, a filter's `respond()`, the rate-limit `429`, chaos error and quota statuses (mock and forward funnels), LLM chaos and enforcement errors, failed templates (`500`, or `404` with `templateFailureAsServerError=false`) and unreadable response files, the LLM cost-budget `429`, refusals (proxy authentication `407`, OpenAPI and validation-proxy `400` and `502`, a proxy-pass loop), `501` for an action this deployment cannot serve, and the `502` or `404` for a forward, callback, before-action or step that failed (`returnBadGateway`, an upstream that sent no response). An expectation's response, a forwarded or proxied response, a callback's response, a CRUD response, a stored OpenAI Responses API response and a static file are not generated. A mark is one null check when no hook is loaded, and only error paths and the chaos branch take it.
+
+### Static files for unmatched requests
+
+`staticFilesDirectory` (default empty) lets `HttpActionHandler.serveStaticFileOrReturnNotFound` answer an unmatched, unproxied `GET`/`HEAD` from a directory, after CRUD, expectation matching, CORS preflight, proxy-pass, proxying and the stored OpenAI Responses lookup, and inside the unmatched-path request breakpoint's continuation. `StaticFileDirectory` (`mockserver-core/.../file/`) resolves the directory's real path once in the `HttpActionHandler` constructor, so the property is startup-only and unset costs one final-field null check on the 404 path. When set, control-plane paths (`HttpState.isControlPlaneRequest`) and other methods go straight to the 404; everything else is resolved and read through `Scheduler.submitStaticFileRead` on the scheduler's own pool of 4 file read threads (shared with matched FILE response bodies, see [Templated response body files](#templated-response-body-files-filebody--templatetype)), created on first use and shut down with the other pools in `Scheduler.shutdown` (pending reads are dropped, as their connections are closing), not on the shared scheduler pool that forwards and delays use. Only a synchronous caller with no channel (the WAR servlets) reads inline, on the servlet container's request thread, where the 1,000-read bound does not apply; HTTP/3 calls `processAction` asynchronously, as HTTP/1.1 and HTTP/2 do, so it hops too. Over 1,000 queued reads a request gets `503` with `Retry-After: 1`, counted as `static_files` in `mock_server_overload_rejections` and logged at most every 10 seconds. The request path is percent-decoded once, then confined like `TemplatedFilePathGuard`: no empty, `.`-prefixed (so `.`, `..` and hidden) segment, no `\`, `:`, `%` or control character, and the real path must be a regular, non-hidden file under the real directory, opened with `NOFOLLOW_LINKS`. Files over 50 MiB, unreadable files and missing files get the normal 404; a served file is logged as `EXPECTATION_RESPONSE` at every log level (like matched and CRUD responses), so verification, dispositions, retrieve and disk recording see it below INFO. `StaticFileDirectoryTest`, `HttpActionHandlerStaticFilesTest` (reading thread, `503`), `StaticFilesIntegrationTest` (including that `stop()` terminates only that server's read pool) and `Http3StaticFilesIntegrationTest` pin the traversal, precedence, HEAD and control-plane behaviour.
+
+### Injected-vs-real latency timing
+
+Every response's `httpResponse.timing` block (`org.mockserver.model.Timing`) records how long the exchange took, split so the dashboard can distinguish latency **MockServer injected** from **real** processing/upstream time. Proxied responses already carry the real `connectionTimeInMillis` / `timeToFirstByteInMillis` / `totalTimeInMillis` measured by `NettyHttpClient`. Three additive fields attribute the injected portion at its natural site: `injectedChaosLatencyMillis` (a chaos-profile latency fault — set in `HttpActionHandler.writeResponseActionResponse` for mock responses and `writeForwardActionResponse` for forwarded ones), `injectedDelayMillis` (the matched action's configured `delay`), and `breakpointHeldMillis` (time held at a response-phase breakpoint). Mock-served responses — which previously had no timing block — now get a minimal one (measured `totalTimeInMillis` plus the injected fields) **only when MockServer actually injected latency** (a chaos fault, a configured delay, or a breakpoint hold); a plain mock with no injection is left without a timing block so its serialised form — and therefore recorded log messages and retrieved responses — is unchanged. When present, the UI derives "real" time as total minus the injected sum. Measurement overhead is a few `System.nanoTime()` deltas and one `Timing` object per response; injected values are sampled once from the `Delay` (exact for static delays, an independent draw for distribution delays). The fields are additive and serialise via the existing `HttpResponseSerializer`, so older clients simply ignore them. Deferred: breakpoint-hold timing is captured only on the mock response path; the forward-path breakpoints (which already surface real upstream timing) do not yet record it.
+
+## HttpState -- The Control Plane Brain
+
+`HttpState` (`mockserver-core/.../mock/HttpState.java`) is the central orchestrator. It owns:
+
+- `RequestMatchers` -- active expectation collection
+- `MockServerEventLog` -- event log (Disruptor-backed)
+- `WebSocketClientRegistry` -- callback WebSocket clients
+- `Scheduler` -- async task execution
+- All serializers for JSON parsing
+
+### Control Plane REST API
+
+`HttpState.handle()` processes PUT requests to control-plane endpoints and returns `true` if handled:
+
+| Endpoint | Action |
+|----------|--------|
+| `PUT /mockserver/expectation` | Deserialize + add/update expectations |
+| `PUT /mockserver/openapi` | Convert OpenAPI spec to expectations (idempotent/incremental sync) |
+| `PUT /mockserver/wsdl` | Convert a WSDL 1.1 document (SOAP 1.1/1.2) to expectations |
+| `PUT /mockserver/pact` | Export active response expectations as a Pact v3 consumer contract (`?consumer=&provider=`) |
+| `PUT /mockserver/pact/verify` | Verify that active expectations satisfy a Pact v3 contract (202 all-pass / 406 failures) |
+| `PUT/GET /mockserver/mode` | Get/set the operating mode (`?mode=SIMULATE\|SPY\|CAPTURE`) — toggles proxy-on-no-match for record/spy workflows |
+| `PUT /mockserver/clear` | Clear expectations and/or logs by request matcher |
+| `PUT /mockserver/reset` | Reset all state (expectations, logs, WebSocket registry) |
+| `PUT /mockserver/retrieve` | Retrieve requests, responses, logs, or active expectations |
+| `PUT /mockserver/verify` | Verify request count against `VerificationTimes` |
+| `PUT /mockserver/verifySequence` | Verify ordered sequence of requests |
+| `PUT /mockserver/grpc/descriptors` | Upload a compiled proto descriptor set (binary body) |
+| `PUT /mockserver/grpc/services` | List all loaded gRPC services and their methods |
+| `PUT /mockserver/grpc/clear` | Clear all loaded gRPC descriptors and reset the store |
+| `PUT /mockserver/files/store` | Store a file in the in-memory file store |
+| `PUT /mockserver/files/retrieve` | Retrieve a stored file by name |
+| `PUT /mockserver/files/list` | List all stored file names |
+| `PUT /mockserver/files/delete` | Delete a stored file by name |
+| `PUT /mockserver/lint` | Lint the expectations in the body without storing them, or the active stored ones when the body is empty: shadowed, unreachable or misspelt expectations (see [Expectation Lint](#expectation-lint)) |
+| `PUT /mockserver/debugMismatch` | Compare a request against all active expectations and return per-field diffs |
+| `PUT /mockserver/explainUnmatched` | Retrieve recent unmatched requests with ranked closest-expectation diagnostics and remediation hints |
+| `PUT /mockserver/explain?correlationId=` | Re-check one recorded request against the current expectations: the expectation that would serve it now, why each one ahead of it lost, and which ones it shadows (see [Explain Endpoint](#explain-endpoint)) |
+| `PUT /mockserver/template/test` | Dry run: render a Velocity, Mustache or JavaScript template against a sample request without an expectation, reporting the rendered response/request or the failure with its template line and column (see [Template dry run and error positions](#template-dry-run-and-error-positions)) |
+| `PUT /mockserver/replay` | Re-issue a recorded request to its target and return the upstream response (see [Request Replay](#request-replay)) |
+| `PUT/GET/DELETE /mockserver/chaosExperiment` | Start, query, or stop a scheduled multi-stage chaos experiment (see [docs/code/chaos.md](chaos.md)) |
+| `PUT /mockserver/trafficValidate` | Validate recorded traffic (all `REQUEST_RESPONSES` from the event log) against an OpenAPI spec supplied in the request body as `{"spec": "<url|path|inline>"}`. Returns a per-pair conformance report in the same shape as `/contractTest`. The `spec` URL host is checked against the same SSRF policy enforced by the forward/replay/contract-test paths before the parser fetches it. Subject to control-plane authentication. |
+
+All control-plane requests go through `controlPlaneRequestAuthenticated()` which enforces mTLS and/or JWT authentication if configured.
+
+#### WSDL Expectation Generation
+
+`PUT /mockserver/wsdl` accepts a raw WSDL 1.1 XML document and generates one `Expectation` per SOAP operation found across all service/port bindings. Implementation is in `WsdlExpectationGenerator` (`mockserver-core/.../mock/wsdl/`). For each operation it builds a `POST` request matcher targeting the path from `soap:address` (or `soap12:address`) and matches on the `SOAPAction` header (SOAP 1.1), the `content-type` `action` parameter (SOAP 1.2), or an XPath body check when no SOAP action is declared. The response is a skeleton SOAP envelope with a `<{Operation}Response/>` element in the WSDL target namespace. The WSDL is parsed through `StringToXmlDocumentParser` with DOCTYPE and external entity resolution disabled (XXE-safe). Returns 201 with the generated expectations as JSON.
+
+#### Pact Contract Export
+
+`PUT /mockserver/pact` (with optional `?consumer=NAME&provider=NAME` query parameters) exports the currently active response expectations as a Pact v3 consumer contract JSON. Implementation is in `PactExporter` (`mockserver-core/.../mock/pact/`). Only expectations with a concrete `HttpRequest` matcher and an `HttpResponse` (or `HttpResponses`) action are included; expectations with notted method/path matchers are skipped; notted header and query-parameter values are dropped from the exported interaction. JSON bodies are embedded as structured nodes. The `consumer` and `provider` parameters default to `"consumer"` and `"provider"` when not supplied. Returns 200 with the Pact JSON.
+
+Non-literal matchers are translated into a Pact v3 interaction-level `matchingRules` object, split across `matchingRules.request` / `matchingRules.response` and keyed by category — `path` / `query` (`$.name[i]`) / `header` (`$['Name'][i]`) / `body`. The `path`/`query`/`header` categories are the inverse of the `PactImporter` mapping, so those rules round-trip back into matchers on import; `body`-category rules (`jsonSchema`/`xpath`) are exported for external Pact consumers but the importer rebuilds the body matcher from the example body only (it does not re-read body rules):
+
+| MockServer matcher | Pact rule |
+|--------------------|-----------|
+| path/query/header value MockServer treats as a regex (contains a regex metacharacter) | `{"match":"regex","regex":"<value>"}` |
+| `schemaString(...)` (`NottableSchemaString`) param/header | `{"match":"type"}` (or `integer`/`number`/`boolean` per the schema `type`) |
+| `jsonSchema(...)` body (`JsonSchemaBody`) | one `{"match":"type"}` per top-level schema property keyed `$.field` (a single `$` rule for a scalar schema); the schema text is not written to the `body` example field |
+| `xpath(...)` body (`XPathBody`) | body-category `{"match":"regex"}` keyed by the XPath expression; no `body` example field |
+
+The mapping is additive: an interaction whose matchers are all literal emits no `matchingRules` object and exports byte-identically to before. Optional and blank matcher values yield no rule (the example value is kept as-is).
+
+#### Pact Contract Verification
+
+`PUT /mockserver/pact/verify` takes a Pact v3 contract JSON as the request body and verifies that MockServer's currently-active expectations satisfy each interaction. Implementation is in `PactVerifier` (`mockserver-core/.../mock/pact/`). For each interaction, the verifier builds an `HttpRequest` from the interaction's request fields, finds matching expectations via `RequestMatchers.retrieveExpectationsMatchingRequest()` (read-only forward matching — no side effects on times/scenarios), and compares the matched expectation's response against the interaction's expected response: status code must be equal, headers use subset matching (each Pact header must be present but extra MockServer headers are allowed), and bodies are compared structurally as JSON when both parse as JSON, otherwise as strings. Only expectations with a static `HttpResponse` (or first of `HttpResponses`) action are verifiable; forward/callback/template actions fail with reason "unverifiable (non-static action)". Returns 202 with `{"verified":true,...}` when all interactions pass, 406 with `{"verified":false,...}` when any fail, or 400 on malformed/empty input.
+
+#### Operating Mode (SIMULATE / SPY / CAPTURE)
+
+`PUT /mockserver/mode?mode=SIMULATE|SPY|CAPTURE` switches the server's operating mode at runtime. `GET /mockserver/mode` returns the current mode as `{"mode":"...","proxyUnmatchedRequests":true|false}`. Implementation is in `MockMode` (`mockserver-core/.../mock/MockMode.java`). The three modes are: **SIMULATE** (default) — match expectations, return 404 on no match; **SPY** — match expectations, forward unmatched requests to the real upstream and record; **CAPTURE** — forward and record all traffic (useful with no expectations defined). SPY and CAPTURE both enable `attemptToProxyIfNoMatchingExpectation`. Recorded interactions are retrieved via the existing `PUT /mockserver/retrieve?type=RECORDED_EXPECTATIONS` endpoint.
+
+#### MCP list_mock_tools
+
+The `list_mock_tools` MCP tool (registered in `McpToolRegistry.registerListMockTools()`, `mockserver-netty/.../mcp/`) generates MCP tool definitions from the currently active response expectations by delegating to `McpToolSchemaGenerator` (`mockserver-core/.../mock/mcp/`). It takes no parameters and returns `{"tools":[...],"count":N}`. Each expectation with a concrete (non-notted) method and path and a response action becomes one tool: the name is derived from `METHOD_path` in lower snake_case (deduplicated and capped at 64 characters), the `inputSchema` exposes query parameters and an optional `body` property, and a `_mockserver` annotation records the target method, path, and expectation ID.
+
+### Retrieve, Clear & Format Enums
+
+The retrieve and clear endpoints accept type parameters:
+
+**`RetrieveType`** (query parameter `?type=`):
+
+| Value | Description |
+|-------|-------------|
+| `REQUESTS` | Received requests matching the filter |
+| `REQUEST_RESPONSES` | Request/response pairs |
+| `RECORDED_EXPECTATIONS` | Expectations recorded from proxy forwarding (supports `?consolidate=true` / `?parameterize=true`, plus `?repeatsAsScenarios=true`, `?captureHeaders=a,b` and `?extractBodiesLargerThan=<bytes>` — see [Record-to-Expectations](#record-to-expectations-rest--consolidation--promotion) and [event-system.md](event-system.md#record--mock-consolidation-promotion-har-import)) |
+| `ACTIVE_EXPECTATIONS` | Currently active expectations |
+| `LOGS` | Log messages |
+
+**`Format`** (query parameter `?format=`):
+
+| Value | Description |
+|-------|-------------|
+| `JSON` | Standard JSON serialization |
+| `JAVA` | Generated Java client API code (via `ExpectationToJavaSerializer`) |
+| `LOG_ENTRIES` | Raw log entry format |
+| `HAR` | HTTP Archive (HAR) export |
+| `OPENAPI` | OpenAPI spec export (applies to `ACTIVE_EXPECTATIONS`) |
+| `POSTMAN` | Postman collection export (applies to `ACTIVE_EXPECTATIONS`) |
+| `BRUNO` | Bruno request collection export (applies to `ACTIVE_EXPECTATIONS`) |
+| `CURL` | cURL command(s) reproducing recorded requests (applies to `REQUESTS` / `REQUEST_RESPONSES`) |
+
+**`ClearType`** (query parameter `?type=`):
+
+| Value | Description |
+|-------|-------------|
+| `EXPECTATIONS` | Clear expectations only |
+| `LOG` | Clear logs only |
+| `ALL` | Clear both expectations and logs (default) |
+
+Clear also supports clearing by `ExpectationId` (not just `RequestDefinition`).
+
+**An empty filter means "all".** An empty body, `{}` and a client's `clear(request())` all clear every expectation
+(including `not(...)`, DNS and binary ones, which reverse matching an empty HTTP filter would skip) and every log entry
+that carries a request. `RequestMatchers.isUnfiltered` decides this for `clear`, `retrieveActiveExpectations` and
+`retrieveRequestMatchers`, and `MockServerEventLog.clear` uses it too. An empty body still goes through
+`RequestMatchers.reset()`, while `{}` removes each expectation in turn and logs a `CLEARED` entry, as any filtered clear
+does. `HttpStateClearUnfilteredTest` pins each clear type and that a real filter still narrows.
+
+**Retrieve by `ExpectationId`.** `PUT /mockserver/retrieve` accepts an `ExpectationId` body (`{"id": "..."}`) in
+place of a `RequestDefinition`, the same as clear and verify. `HttpState.retrieve()` and `HttpState.clear()` share
+`parseExpectationId(body)`, which attempts `ExpectationIdSerializer.deserialize` and returns null when the body is not
+an id — the two forms are unambiguous because both JSON schemas set `additionalProperties: false` and only
+`expectationId.json` allows (and requires) `id`. **Order matters:** the id must be parsed *before* the body is handed
+to `RequestDefinitionSerializer`, which rejects `{"id": "..."}` on schema validation.
+
+The id is then resolved to that expectation's request definition via `resolveExpectationId(...)` and used as the
+filter, so `REQUESTS`, `REQUEST_RESPONSES`, `RECORDED_EXPECTATIONS` and `LOGS` are filtered exactly as
+`verify(ExpectationId)` filters them; an unknown id throws `IllegalArgumentException("No expectation found with id ...")`
+from `RequestMatchers.retrieveRequestDefinitions`, surfacing as a 400.
+
+`ACTIVE_EXPECTATIONS` is the exception: it filters on the **id itself** (`retrieveActiveExpectations(null)` then a
+`getId()` filter), not on the resolved request definition. Matching by request definition would return every *other*
+expectation whose matcher also matches that request, and would miss expectations (OpenAPI, JSON-schema or regex
+matchers) whose own request definition does not match their own matcher.
+
+### Pre-HttpRequestHandler Routes
+
+Before a request reaches `HttpRequestHandler`, the Netty pipeline may intercept it at an earlier stage:
+
+| Route | Handler | Description |
+|-------|---------|-------------|
+| `/mockserver/mcp` | `McpStreamableHttpHandler` | MCP (Model Context Protocol) server endpoint (Streamable HTTP transport with JSON-RPC 2.0). Intercepted in the pipeline before `MockServerHttpServerCodec`. Only active when `mcpEnabled=true`. Methods dispatched by `McpRequestProcessor`: `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get` (built-in prompts from `McpPromptRegistry`, `{{argument}}` substitution: `debug_unmatched_request`, `why_did_verify_fail`, `fix_my_expectation` and `why_forward_failed` chain existing tools and ask for "Facts from MockServer" apart from "Interpretation"; `fix_my_expectation` starts from `suggest_expectation_fix` and `why_forward_failed` from `explain_forward_failure`, each falling back to an older tool only when the diagnosis tool has nothing: `debug_request_mismatch` when no fix is suggested, `matchesAfterPatch` is false or fields are unpatched; `retrieve_logs` by correlation id when `causeNamed` is false; `retrieve_request_responses` when no failed forward is recorded, which `McpDiagnosisPromptChainTest` and `McpForwardFailurePromptIntegrationTest` run; `create_mock_from_description` drives `create_expectation` / `raw_expectation`, whose errors list `unknownParameters` or schema `validationErrors`; `McpPromptRegistryTest` fails if a prompt names a tool that is not registered; a required argument that is absent or `null` is answered with `INVALID_PARAMS` naming it in `error.message` and `error.data.missingArguments`) and `sampling/createMessage` (returns a mocked completion: `role`/`content`/`model`/`stopReason`). The `prompts` and `sampling` capabilities are advertised in the `initialize` result. |
+| `/_mockserver_callback_websocket` | `CallbackWebSocketServerHandler` | WebSocket upgrade for object/closure callbacks |
+
+### gRPC Built-in Services (in GrpcToHttpRequestHandler)
+
+`GrpcToHttpRequestHandler` intercepts gRPC requests before they reach the normal expectation-matching pipeline. The following built-in gRPC services are handled directly without user-defined expectations:
+
+| Path | Handler | Description |
+|------|---------|-------------|
+| `/grpc.health.v1.Health/Check` | `GrpcHealthCheckHandler` | Health check (returns serving status from `GrpcHealthRegistry`) |
+| `/grpc.reflection.v1.ServerReflection/ServerReflectionInfo` | `GrpcServerReflectionHandler` | Server Reflection v1 (lists services, resolves symbols/files from loaded descriptors) |
+| `/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo` | `GrpcServerReflectionHandler` | Server Reflection v1alpha (same behaviour as v1) |
+
+**Server Reflection** enables tools like `grpcurl list` and `grpcurl describe` to introspect the gRPC services loaded into MockServer without a local proto file. The handler decodes `ServerReflectionRequest` messages and responds with service listings, file descriptors by symbol, or file descriptors by filename. It uses `CodedInputStream`/`CodedOutputStream` for manual protobuf encoding (no generated reflection stubs).
+
+With `dataPlaneAuthenticationRequired` on, reflection needs data-plane credentials, because it discloses the loaded schemas; the health check does not, because it is a liveness probe (see [Data Plane Authentication](tls-and-security.md#data-plane-authentication)). HTTP/3 serves neither.
+
+**Limitation:** The current gRPC path in MockServer is buffered-unary -- each HTTP/2 request carries exactly one gRPC message. Server Reflection therefore handles a single `ServerReflectionRequest` per HTTP/2 request, which is sufficient for `grpcurl list`, single symbol lookups, and file lookups. Fully-interactive bidi-streaming reflection (a long-lived stream with multiple back-and-forth messages) is not supported by the buffered pipeline.
+
+### Non-Control-Plane Routes (in HttpRequestHandler)
+
+| Route | Method | Handler |
+|-------|--------|---------|
+| `/mockserver/status` | PUT | Returns port binding JSON (bound ports, version, group/artifact id, and `gitHash` when built from a git checkout) |
+| Liveness path | GET | Returns port binding JSON |
+| `/mockserver/bind` | PUT | Dynamically bind additional ports |
+| `/mockserver/stop` | PUT | Graceful shutdown |
+| `/mockserver/dashboard` | GET | `DashboardHandler.renderDashboard()` |
+| `/mockserver/metrics` | GET | `MetricsHandler` (Prometheus) |
+| CONNECT method | - | HTTP CONNECT tunnel setup |
+| Everything else | - | `HttpActionHandler.processAction()` |
+
+### Control-Plane Failures: 400 or 500
+
+When handling a control-plane request throws and no endpoint-specific `catch` answers it, every frontend
+(`HttpRequestHandler` for HTTP/1.1 and HTTP/2, `Http3MockServerHandler`, `MockServerServlet`, `ProxyServlet`) and the
+scheduler-run `/llm/optimisationReport` and `/llm/diffRuns` answer through `ControlPlaneFailureResponse` (core):
+
+| Thrown | Status | Body | Log |
+|--------|--------|------|-----|
+| `IllegalArgumentException` (every deserializer reports unreadable or schema-invalid JSON this way), `UnsupportedOperationException`, a Jackson `JsonProcessingException` other than a write failure (`StreamWriteException`) or `InvalidDefinitionException` | `400` | the exception's message, `text/plain` | one `ERROR` entry with the message |
+| anything else, `Error`s included | `500` | `unexpected error processing request, see the MockServer log for correlation id: <id>`, `text/plain` | one `ERROR` entry with the stack trace under that correlation id |
+
+The same catch-all in `HttpRequestHandler` also answers a fault on the data-plane path outside `processAction`'s own
+`catch` (`CONNECT` set-up, the data-plane authentication gate, the TLS-required check), so those are a `500` too.
+`processAction`'s own `catch` (`HttpRequestHandler` for HTTP/1.1 and HTTP/2, both `Http3MockServerHandler` paths) and
+the servlets' `catch` for a data-plane request (one that reached `processAction`, or whose decoding failed on a path
+that is not a control-plane path, `HttpState.isControlPlanePathCandidate`) answer
+every exception as the `500` row does, whatever its class, with the same body and log entry, but written as a mock
+response (`ControlPlaneFailureResponse.dataPlaneFailureResponse`), so it carries CORS headers only when
+`enableCORSForAllResponses` is on and no `version` header; on the gRPC-over-HTTP/3 path
+the answer is the gRPC `INTERNAL` status carrying that message, and an HTTP/3 stream already answered is not answered again.
+The correlation id is the request's log correlation id (set by `HttpState.handle`), or a new one when the failure came
+before it was set. Before 9.0.0 the catch-all answered every exception `400` with its bare message (an exception <!-- version-ref:keep -->
+without one gave an empty body) and an `Error` closed the connection with no response. The Java client raises a
+`500` as a `ClientException` whatever the call passed as `throwClientException`, as it raises a `400` as an
+`IllegalArgumentException`.
+
+Endpoints that catch their own exceptions (`HttpState`'s identity providers, import, promote recordings, baseline
+compare, Pact, CRUD, gRPC, WASM, files, clock, chaos, load scenarios, scenarios, cassettes, breakpoint matchers,
+diagnostics, contract test, traffic validation, replay and AsyncAPI routes, and the Netty `PUT /mockserver/configuration`
+route) apply the same split. A client error by `ControlPlaneFailureResponse.isClientError`, plus an invalid gRPC
+descriptor set (a protobuf `InvalidProtocolBufferException` or `DescriptorValidationException` among the causes), keeps
+the endpoint's `400` and its own message format. Anything else is answered `500` through
+`ControlPlaneFailureResponse.writeUnexpectedFailure` (text endpoints) or `HttpState.unexpectedFailure` (JSON endpoints,
+`{"error": "<the same generic message>"}`), logged once with the stack trace. An endpoint that reads no input (for
+example `PUT /mockserver/files/list`, `PUT /mockserver/grpc/services`, `GET /mockserver/wasm/modules`, and the `GET`
+status routes for the clock, proxy configuration, service, TCP and gRPC chaos, gRPC health, chaos experiments and
+their history, load scenarios, preemption, cluster, drift and audit, plus `DELETE /mockserver/chaosExperiment`)
+answers every exception `500`; drift and audit read only a `limit` whose parse errors fall back to the default. When
+the JSON body describing a caller's error cannot itself be written, the error builders (`serviceChaosError`,
+`loadScenarioError`, `sloError` and the rest) answer `500` the same way rather than `400` with a fixed message.
+`AsyncApiControlPlaneImpl.load` reports a spec or broker configuration it cannot read as an
+`IllegalArgumentException`, so only a failure after that, such as a broker connection, is a `500`.
+
+Loading an OpenAPI spec may fetch a URL with blocking I/O, so no spec load runs on, or is waited for by, the
+event loop of the request that needs it. When the URL is served by the same MockServer, the fetch's connection can be
+served by the very loop that is waiting for it, and the request stalls until the fetch times out (every time with
+`nioEventLoopThreadCount(1)`). One exception remains: a streaming validation-proxy response is validated in the
+streaming body's completion listener (`HttpActionHandler.validateProxyResponse`), on whichever thread ends the
+stream, typically the upstream connection's event loop. The spec was loaded when the request was validated, so this
+fetches only if it has expired from the parser's cache since; that thread is then blocked for the fetch.
+
+| Entry point | Off-loop mechanism |
+|-------------|--------------------|
+| `PUT /mockserver/openapi`, `PUT /mockserver/loadScenario/generateFromOpenAPI` | `HttpState.handle` dispatches the request on the scheduler's executor (`dispatchOffTheEventLoop`), which writes the response; `handle` returns `true` at once |
+| `PUT /mockserver/expectation`, `/retrieve`, `/clear`, `/verify`, `/verifySequence`, `/breakpoint/matcher`, `/recordings/promote` whose body contains `specUrlOrPayload` (an OpenAPI request matcher) | The same dispatch; without that field these run inline as before |
+| `PUT /mockserver/contractTest`, `PUT /mockserver/trafficValidate` | Their own run is submitted to the executor (`runOffTheEventLoop`), and on Netty the calling thread is released at once rather than waiting for it; a servlet still waits for the run (`releaseCallerWhenOffloaded`) |
+| `httpForwardValidateAction` | The action is submitted to the scheduler before it is scheduled, since an undelayed `Scheduler.schedule` runs inline |
+| OpenAPI-backed mock with `validateRequestsAgainstOpenApiSpec` or `openAPIResponseValidation` on | `dispatchPrimaryAction` runs on the scheduler (response validation loads the spec again once it has left the parser's cache) |
+| Validation proxy, MCP tools, dashboard rendering | Already off the loop: the scheduler, the MCP executor and the dashboard's own executor |
+
+A synchronous `Scheduler` has no executor, so with one this work runs on the calling thread
+(`HttpState.runOffTheEventLoop`). A servlet deployment (`handle(..., warDeployment=true)`) builds an asynchronous
+`Scheduler` but has no `AsyncContext`, so it dispatches inline and waits for any offloaded run: the servlet commits
+its response as soon as `handle` returns. Data-plane dispatch is `synchronous` on a servlet, so the scheduler runs
+those submissions inline. Work moved to the executor keeps the receiving port
+(`HttpState.getPort()`) for the events it logs. `OpenApiSelfServedSpecFetchIntegrationTest` (mockserver-netty) runs
+each entry point against a single-event-loop server serving its own spec; `HttpStateOpenAPISpecLoadThreadTest`
+(mockserver-core) checks that `handle` returns while the spec fetch is held.
+
+## Expectation Matching
+
+### RequestMatchers
+
+Expectations are stored in a `CircularPriorityQueue` sorted by priority (highest first), then creation time (earliest first). The `firstMatchingExpectation()` method accepts an `HttpRequest` and iterates in sort order, returning the first match.
+
+When no expectation matches, the method logs a **closest match summary** identifying the expectation with the fewest field differences, along with a match score (e.g., "matched 8/12 fields"). This helps users quickly identify which expectation was closest to matching.
+
+An expectation that is no longer active (its `Times` are used up or its time to live has expired) is never offered as the closest match, here, in `findClosestMatchHint`, in `explainUnmatched` or in `debugMismatch`. It stays in the store until lazy removal runs, and it fails every request without recording a difference, so it would otherwise rank closest with zero differences and the 404 hint header, which names the first differing field, would be left off. `RequestMatchersInactiveClosestMatchTest` pins the serving scan (including the candidate-index reconciliation and an expectation whose last response is still being written) and the hint; `HttpStateExplainUnmatchedRankingTest` and `HttpStateDebugMismatchClosestMatchTest` pin the two endpoints.
+
+`HttpState` obtains its `RequestMatchers` through `ExpectationStoreFactory` (a small SPI/registry) rather than constructing it directly. By default the factory returns the standard in-memory `RequestMatchers` (zero behaviour change). This is the **clustered-state seam**: an optional backend can register a factory returning a clustering-aware `RequestMatchers` so a fleet of MockServer instances shares expectations. The optional `mockserver-state-infinispan` module implements this with an embedded Infinispan data-grid backend; activate it by setting `stateBackend=infinispan`. See [Clustered State](clustered-state.md) for full details.
+
+Every comparison runs against a `MatchDifference` context, but detailed field-level differences are **recorded only when they will be read**: when `detailedMatchFailures` is on (the default) *and* INFO logging is enabled — the levels that consume them (the per-field "because" text in the `EXPECTATION_NOT_MATCHED` entry and the closest-match selection, both INFO-gated; TRACE implies INFO). At WARN/ERROR/OFF, or with `detailedMatchFailures` off, a single reusable `MatchDifference` serves the whole scan and records nothing, so a large no-match scan does not allocate a per-candidate context and difference map that nothing would read (the tracked perf baseline runs at ERROR). The `MatchFailureHints` utility adds actionable suggestions for common mistakes (trailing slashes, Content-Type charset mismatches, unescaped regex metacharacters). Read-only diagnostics (`explainUnmatched`, `explain`, `debugMismatch`, verification, drift) build their own detailed `MatchDifference` independently, so they are unaffected by the serving-path log level.
+
+**Per-expectation entries and `maxLoggedMatchFailures`.** At INFO each comparison that does not match writes its own `EXPECTATION_NOT_MATCHED` entry (the "because" text, an expectation clone, and a render of the request and the expectation on the logging thread), so the cost of a miss grows with the number of expectations compared, and so does the share of the event log it takes. `maxLoggedMatchFailures` (default `50` since 9.0.0; any negative value, such as `-1`, means no limit) caps how many of those entries one request writes, in evaluation order: the candidates first, then the closest-match walk. `RequestMatchers` hands every `MatchDifference` of the scan the same `NotMatchedLogBudget`; a matcher (HTTP, DNS, binary, and through them OpenAPI, which passes the budget to each operation's context, and conditional, which shares its context with its branches) builds the "because" text and writes the entry only while the budget has room, and records each entry it writes or withholds. So the budget counts entries, not evaluations: an evaluation that writes nothing (a DNS or binary expectation against an HTTP request, a used-up OpenAPI expectation, one with no operations) leaves it alone, and an OpenAPI expectation uses one per operation. `EXPECTATION_MATCHED` is still logged and the recorded differences are the same, so the served expectation, the closest match, lazy removal and the namespace line do not change. On an unmatched request the closest-match line then says `N further did-not-match entries were not logged (maxLoggedMatchFailures)`, before the evaluation-cap note when both apply. A request that is served writes no closest-match line, so entries withheld on its way (including a conditional's guard entry when its else branch serves it) are not reported. The 404 hint, `explain`, `explainUnmatched` and `debugMismatch` recompute with logging suppressed, so they are unaffected. `RequestMatchersMaxLoggedMatchFailuresTest` compares each limited run with the unlimited run over a corpus (log level, detailed failures, fail-fast, indexed and un-indexed, used-up, 0% and foreign-namespace expectations, DNS, binary, active and used-up OpenAPI and conditional expectations, served and unserved probes): same served expectation, same store after lazy removal, and the same entries in the same order except the did-not-match entries past the limit; `NotMatchedLogBudgetTest` pins the accounting for each matcher type. `MatchFailureLogLimitBenchmark` (the `MatchingBenchmark` `EXACT` shape at INFO, 1,000 expectations, rendering on the calling thread, so the score is the whole CPU cost of a miss) measured 3.3 ms and 12 MB allocated per miss with no limit, 0.13 ms and 35 KB with `0`, and 0.16 ms and 157 KB with `10` (4.4 ms, 0.16 ms and 0.21 ms with `detailedMatchFailures`); with no limit, `MatchingBenchmark` (`EXACT` and `HEADERS_MISS`, INFO and WARN, 1,000 expectations) stayed within run-to-run noise of the code before the property, in time and in bytes allocated per miss. <!-- version-ref:keep -->
+
+#### Request body parsed once per scan
+
+A scan over the expectations (`firstMatchingExpectation`, `findClosestMatchHint`, `peekFirstMatchingExpectation`, `retrieveExpectationsMatchingRequest`) parses a JSON request body once, not once per JSON or JSONPath expectation. Each scan opens a `ParsedBodyCache` scope on the `HttpRequest` (the cache itself is created only when a JSON matcher first asks for it) and detaches and empties it in a `finally`, so nothing parsed outlives the scan — the request object itself may be retained by the event log.
+
+- **Scope and ownership.** The cache is bound to the thread that opened it. A nested scan on that thread reuses it; another thread matching the same request object parses for itself. Entries are keyed on the body text, so a different body is re-parsed rather than served stale.
+- **What is shared.** `JsonStringMatcher` shares the Jackson tree; `JsonPathMatcher` shares the json-smart document (the provider Jayway defaults to — its `Collection` results are what the matcher tests). A JSONPath that mentions `append` never reads the shared document, because Jayway's `append()` writes to the document it reads.
+- **Why not a thread-local.** The previous per-thread cache kept the last body and its tree on every matching thread for the life of the JVM, surviving `reset`. XML is deliberately not shared: a DOM `Document` is mutable, and an earlier per-request DOM cache (`92b1c8f79`) was reverted. `StringToXmlDocumentParser` instead reuses one hardened `DocumentBuilderFactory` per namespace mode and builds a fresh `DocumentBuilder` and `Document` per parse (the JDK factory's `newDocumentBuilder()` only reads its configuration).
+- **Evidence.** `BodyParseDifferentialTest` pins verdicts, differences and log entries for a JSON/JSONPath/XPath corpus against digests captured before the change; `ParsedBodyCacheTest` asserts one parse per scan and an empty, detached cache afterwards.
+
+#### 404 closest-match hint — capped and memoised per (method, path)
+
+**On an unmatched request, `findClosestMatchHint` (the `x-mockserver-closest-match-hint` header, the opt-in mismatch diagnostic and the DEBUG diff log) checks at most 1,000 expectations in serving order, and reuses work per (method, path) until the store changes, giving the same hint as a full scan of those expectations.** Before, every 404 re-evaluated every expectation.
+
+```mermaid
+flowchart TD
+    MISS([unmatched request]) --> ELIG{"plain method and path,\nnot a NOT request,\nkey <= 1024 chars,\nbelow TRACE?"}
+    ELIG -->|No| SCAN["capped scan\nfirst 1,000 in serving order"]
+    ELIG -->|Yes| TAG{"memo tag = store generation,\nmodification count, fail-fast?"}
+    TAG -->|changed| NEW["new empty memo"] --> ENTRY
+    TAG -->|same| ENTRY{"entry for\n(method, path)?"}
+    ENTRY -->|No| REC["capped scan, recording\nwhich non-matches are reusable"] --> PUT["store entry\n(empty the memo first if 256 entries)"]
+    ENTRY -->|Yes| REPLAY["re-evaluate only the other matchers,\nmerged in serving order with\nthe kept reusable non-matches"]
+```
+
+- **What is reusable.** `HttpRequestPropertiesMatcher` marks its `MatchDifference` (`isDecidedByMethodOrPath`) when it returns from the METHOD or PATH fail-fast check, so it read nothing but the request's method and path. Such a non-match is reused for every request with that method and path, provided the expectation has unlimited `Times` and time to live (otherwise it can go inactive without any store change) and the matcher is exactly `HttpRequestPropertiesMatcher`: a `ConditionalRequestMatcher` passes one context to its guard and then its branch, so a guard that fails on PATH marks it and the `else` branch then records the request's header or body values, and an `AnyOfRequestMatcher` passes it to one branch after another the same way. Every other matcher, including any that matched, is re-evaluated against the live request, in order.
+- **Why it is exact.** The scan keeps the first matcher with strictly fewest differences. A reusable non-match with no fewer differences than an earlier reusable one can never win, so an entry keeps only the strictly improving ones (usually one) and replays them at their original positions. Nothing that depends on headers, body, query or cookies is ever reused, so one client's values cannot appear in another's hint.
+- **Invalidation.** The memo is tagged with the `CircularPriorityQueue` generation (bumped inside every structural change, including the in-place update before its backend write returns), the `markMatchersModified` counter and `matchersFailFast`; any change replaces the whole memo, and `markMatchersModified` also drops it at once so it does not hold removed expectations until the next miss. `lastModifiedEpochMillis` is not used: two changes within one millisecond share a value.
+- **Bounds.** At most 256 entries (emptied when full, because paths are client-controlled), keys up to 1,024 characters, and an entry that would re-evaluate more than 256 matchers stores only "scan everything". Requests that are not eligible always take the capped scan.
+- **The cap.** With more than 1,000 expectations the hint is the closest among the first 1,000 in serving order, and the header ends with `; only the first 1000 expectations were checked`; the opt-in diagnostic body adds `"truncated": true` and `expectationsChecked`, and the DEBUG diff line names the count. The INFO closest-match walk on the serving path (`fullScanClosestMatchAndLazyRemoval`) shares this cap but not the memo; see the candidate-index section below.
+- **Evidence.** `RequestMatchersClosestMatchMemoTest` compares every hint with a copy of the old scan (which also skips inactive expectations) over a 600-request corpus across add, remove, in-place update (including one whose backend write is still in flight), a `once()` and an `exactly(2)` expectation used up while still stored (each checked inactive, and no hint may name it), time-to-live expiry, a fail-fast change and reset, and also pins the bounds, the cap, the TRACE and NOT bypasses, and that concurrent callers never see each other's header values.
+
+#### Mutator serialization — concurrent control-plane writes (issue #2579)
+
+Control-plane mutations do **not** run under an external single-writer lock: `PUT /mockserver/expectation` executes `RequestMatchers.add` on the connection's Netty worker thread, and there are `nioEventLoopThreadCount` of them, so multiple adds genuinely race. `RequestMatchers` keeps its node-local cache correct with two internal mechanisms:
+
+- **Short in-memory critical sections.** Each mutator (`add`, `update`, `reset`, `removeHttpRequestMatcher`) mutates the non-thread-safe `CircularPriorityQueue` (and the matcher cache) only inside a `synchronized(this)` block; the removed-expectation definition history (`RetiredRequestDefinitions`) is self-synchronized and calls nothing outside itself. Each block is purely in-memory and — this is the invariant — contains **no backend call, no listener notification and no blocking I/O**. `add`/`update` therefore release the monitor *before* writing `expectationBackend`, so a slow (clustered) backend write never stalls another thread's mutation. Holding the monitor across `expectationBackend.put` is exactly what deadlocked the clustered backend in the reverted first fix (`98ab5d8de`); see [Clustered State → Concurrency contract](clustered-state.md).
+- **In-flight-add protection for the eviction trim.** After writing the backend, `add` runs an eviction reconcile (`trimEvictedFromBackend`) that deletes cached ids missing from a backend snapshot. Before this was hardened, one thread's trim could observe another thread's just-inserted matcher *before* its backend write landed, mis-classify it as evicted and delete it — silently dropping a `201`-acknowledged expectation. Each mutator now registers its id in the reference-counted `addsInFlight` registry before touching the cache and deregisters it only after the backend write returns; both the trim and the clustered reconcile take their snapshots in the order `cachedIds → protectedIds(=addsInFlight) → backendIds` (cached ids first, backend last) and evict only `cachedIds − backendIds − protectedIds`, which provably cannot drop an in-flight add.
+
+The **read / matching** path (`firstMatchingExpectation`, `firstMatchingEarlyExpectation`, the `retrieve*` family and `size()`) is deliberately **not** synchronized — it relies on the queue's eventually-consistent `toSortedList()` snapshot — so request throughput is unaffected by control-plane writes. The snapshot is cached and tagged with a generation number that every mutation bumps after changing the store and before notifying the mutation listener. A read serves the cached list only if its tag matches the current generation, so a list that a reader built before a concurrent mutation, and published after it, is never served once that mutation has returned.
+
+#### CandidateIndex — matching acceleration for large expectation sets
+
+For small expectation sets the full sorted list is always scanned (O(n)). When the expectation count reaches or exceeds `candidateIndexThreshold` (default 64), `RequestMatchers` delegates to `CandidateIndex` (`mockserver-core/.../mock/CandidateIndex.java`) to narrow the scan to a **candidate set** for the incoming request. The matched expectation is byte-for-byte identical to the full linear scan result because:
+
+1. An expectation is placed in a `(method, path)` bucket **only** when both its method and path are plain literal equality matchers — non-null, non-blank, non-notted, non-optional, non-schema, regex-metacharacter-free, and pure-ASCII. Any expectation that does not meet every criterion (regex, notted, optional, blank, schema/OpenAPI string, path-parameter rewrite, or non-`HttpRequest` definition) goes in the **fallthrough** list instead.
+2. The candidate set for a request is `bucket(method+path) ∪ fallthrough`. Any expectation outside this set is in a different literal bucket and provably cannot match the request.
+3. Candidates are evaluated in the **same global priority/insertion sort order** as the full scan, so the first match among candidates equals the first match of the full scan.
+
+Additional correctness constraints:
+
+- **Case-insensitive mode** (`matchExactCase=false`, the default): bucket keys are folded with `toLowerCase(ROOT)`. However, a non-ASCII request method or path cannot be safely narrowed by fold-based bucketing (e.g. Turkish dotted-I U+0130 changes length under `toLowerCase`), so such requests fall back to the full authoritative scan.
+- **Blank method/path on the request** (only constructible programmatically): falls back to the full scan because a blank request component matches the method/path criterion of every expectation.
+- **Closest-match reconciliation on a miss**: when the index was used, nothing matched and INFO/DEBUG is enabled, `fullScanClosestMatchAndLazyRemoval` walks the full sorted list so the closest-match entry covers expectations beyond the candidates (up to the evaluation cap below) and the namespace-skip count and lazy removal cover every expectation. It **does not evaluate the candidates again**, so the walk adds no second `EXPECTATION_NOT_MATCHED` / `EXPECTATION_MATCHED` entry for them (re-evaluating them also doubled the miss cost at INFO when every expectation shares one bucket). `RequestMatchersUnmatchedDiagnosticsTest` and `RequestMatchersUnmatchedDiagnosticsStoreChangeTest` pin this.
+  - *Candidates* are recognised by identity, through a set built from the candidate list, not by sort key: another thread can re-key an expectation's priority at any time, including during the walk. The set is the only extra allocation, and only on this INFO miss path; the matched path never reaches this code.
+  - *Stand-in*: the narrowed scan's closest candidate (the first candidate with the fewest failures) stands in for all candidates. It is offered where the walk reaches its own matcher or, if that matcher is no longer in the store, at the position of its scan-time sort key. A candidate can leave the store between the scans, e.g. when its lazy removal, scheduled by the narrowed scan, completes on the scheduler pool first (inline in tests that use a synchronous `Scheduler`).
+  - *Evaluation cap*: the walk evaluates at most 1,000 expectations beyond the candidates (`closestMatchMaxEvaluations`, shared with the 404 hint), in serving order, so an INFO miss logs at most that many `EXPECTATION_NOT_MATCHED` entries beyond its candidates' however many expectations are stored. Past the cap the walk still counts namespace skips and schedules the lazy removal of every inactive matcher (an inactive matcher never matches, so this is the outcome its evaluation would have had); the rest are counted as not checked, and the closest-match line then ends with `only N of M expectations were checked, so a closer one may exist`. The closest match is the first with the fewest differences among the candidates and the evaluated expectations, so a candidate past the cap can still be named. The walk is not memoised like the hint: each evaluation logs its own `EXPECTATION_NOT_MATCHED` entry, which a reused result could not produce. `MatchingBenchmark` (`EXACT`, INFO, `-p expectationCount=5000`) measured a miss with 5,000 expectations at 17.2 ms before the cap and 4.6 ms after (22.8 ms and 4.6 ms with `detailedMatchFailures`); with 1,000 expectations it is unchanged at about 3.3 ms (4.4 ms), against 0.08 us at WARN, because INFO writes one entry per compared expectation; `RequestMatchersClosestMatchWalkCapTest` compares the capped walk's entries with the un-indexed scan over the expectations it checked, and its lazy removals and namespace-skip line with the un-indexed scan over the whole store.
+  - *Store changes*: each expectation is evaluated at most once per request, except one deleted and re-created with the same id during the request; an expectation present for the whole request is evaluated exactly once, unless the namespace gate excludes it. Changes made before the walk takes its snapshot are reflected in it; changes made during the walk may not be. With a store that does not change during the request, an indexed miss emits the same set of entries as the un-indexed scan, candidates' entries first.
+- **Incremental (per-mutation) maintenance**: the index is maintained as the store changes — `onAdded`/`onRemoved` update one bucket in O(1), driven by a mutation listener `RequestMatchers` wires onto the backing `CircularPriorityQueue` (`RequestMatchers.java:236`), so add, remove, in-place update, priority re-key, overflow eviction and reset all reach it. **A read never rebuilds.** This replaced an earlier generation-driven rebuild-on-read-after-any-mutation design, which was O(n) per request under churn and, being `synchronized`, serialised concurrent readers so it got worse with more cores — and churn is produced by the serving path itself, since `once()` / limited-`Times` matchers schedule their own lazy removal. Measured at 15,000 expectations, the churn-versus-static penalty went from **8,168x to 1.03x** in time and **~13,000x to 1.06x** in allocation. The only rebuild left is a one-off reconciliation when a read observes a live `matchExactCase` change.
+
+```mermaid
+flowchart TD
+    REQ([firstMatchingExpectation]) --> SZ{"expectation count\n>= threshold?"}
+    SZ -->|No| LINSCAN["Full linear scan\nCircularPriorityQueue.toSortedList()"]
+    SZ -->|Yes| BLANK{"Request has concrete\nmethod AND path?"}
+    BLANK -->|No| LINSCAN
+    BLANK -->|Yes| CASE{"Case-insensitive mode\nAND non-ASCII method/path?"}
+    CASE -->|Yes| LINSCAN
+    CASE -->|No| INDEX["CandidateIndex\nbucket(method+path) union fallthrough\nin global sort order"]
+    LINSCAN --> EVAL
+    INDEX --> EVAL["Evaluate each candidate\nin priority/insertion order"]
+    EVAL -->|Match| DONE([Return expectation])
+    EVAL -->|Exhausted| NULL([Return null])
+```
+
+##### `clear` uses the index too — via a second, path-only dimension
+
+`RequestMatchers.clear(RequestDefinition)` used to run a full match against **every** registered
+expectation, and a per-test teardown typically does three of them. It now asks the index for a
+candidate set (`CandidateIndex.clearCandidates`), falling back to the untouched full scan whenever
+narrowing would be unsound. Narrowing can only ever *shrink* the set, and only where the excluded
+matchers provably could not match — everything not bucketed sits in a fallthrough that is always
+unioned in — so the failure mode being designed against, **silent under-removal**, cannot arise from
+a missing bucket.
+
+A clear is served from one of two dimensions:
+
+| clear shape | served from |
+|---|---|
+| literal method AND literal path | the `(method, path)` bucket ∪ fallthrough (the same dimension matching uses) |
+| literal path, no method (or a non-literal one) | a **path-only** bucket ∪ a path-only fallthrough |
+
+The path-only dimension exists because the common teardown shape — and the one the measurement
+actually used — names a path without a method, which the `(method, path)` buckets cannot serve.
+
+Two constraints are easy to get backwards:
+
+- **A clear is always case-insensitive**, whatever `matchExactCase` says: `HttpRequestPropertiesMatcher`
+  computes `caseSensitive = !controlPlaneMatcher && matchExactCase()`, and a clear is a control-plane
+  matcher. So narrowing is only sound from a case-insensitively folded index, which exists exactly
+  when `matchExactCase` is **off** (the default). With it on, the full scan runs.
+- **A regex-path clear legitimately spans many literal buckets** (clearing `/a.*` must remove `/a1`
+  and `/a2`), and **a literal clear must also remove a regex expectation that covers it**. The first
+  falls back to the full scan; the second works because regex-path expectations live in the
+  fallthrough.
+
+Measured candidate-enumeration cost at 15,000 expectations: **1,585 µs → 0.2 µs**, and flat across
+store size rather than linear.
+
+### Expectation Namespacing (Multi-Tenancy)
+
+**Outcome:** multiple teams or test-suites can share one MockServer instance without their expectations colliding, by partitioning expectations into named namespaces (tenants). The feature is **additive and backward-compatible** — with no namespace ever set, behaviour is exactly as before.
+
+An expectation carries an optional `namespace` (a.k.a. tenant) string (`Expectation.withNamespace(...)`, `null` = the global namespace). A request declares its namespace via a configurable request header (`matchNamespaceHeader`, default `X-MockServer-Namespace`; env `MOCKSERVER_MATCH_NAMESPACE_HEADER`).
+
+**Matching rule** (`RequestMatchers.matchesNamespace`, applied as a pre-filter in `firstMatchingExpectation` / `firstMatchingEarlyExpectation` before each candidate is matched):
+
+| Request namespace `T` (from header) | Expectation namespace | Eligible to match? |
+|-------------------------------------|-----------------------|--------------------|
+| any (incl. absent) | `null` (global) | yes |
+| `T` | `T` | yes |
+| `T` | other (`≠ T`) | no |
+| absent | non-null | **no** |
+
+**No-header default decision — Option A (true isolation):** a request with no namespace header sees only global (null-namespace) expectations, never any tenant's. This is the least-surprising, safest default: isolation holds by construction, so a client that forgets the header (or a stray request) can never accidentally hit another tenant's mocks; shared infrastructure stubs are explicitly placed in the global namespace. (Option B — no-header sees everything — was rejected: it makes isolation opt-out and lets a forgotten header silently leak cross-tenant matches.)
+
+The namespace header does **not** participate in normal header matching: matching is unchanged except for the extra pre-filter skip. Existing expectations only match headers they explicitly declare, and the MockServer-specific namespace header is not one of them, so a request carrying it still matches a global expectation exactly as before. The header is not stripped.
+
+```mermaid
+flowchart TD
+    REQ([Incoming request]) --> NS["Extract request namespace\nfrom matchNamespaceHeader"]
+    NS --> LOOP{"For each expectation\nin priority order"}
+    LOOP --> GATE{"namespace gate:\nexpectation global OR\nexpectation.namespace == request.namespace?"}
+    GATE -->|no| LOOP
+    GATE -->|yes| MATCH["normal field matching\n(method, path, headers, body, ...)"]
+    MATCH -->|match| DONE([serve])
+    MATCH -->|no match| LOOP
+```
+
+**Scoped control-plane operations** (`HttpState.resolveNamespaceFilter` reads the `?namespace=T` query parameter, falling back to the `matchNamespaceHeader` header on the control-plane request):
+
+- `PUT /mockserver/clear?type=expectations&namespace=T` (and `?type=all&namespace=T`) removes **only** namespace `T`'s expectations via `RequestMatchers.clearByNamespace(...)`, leaving other tenants' and global expectations intact. A blank namespace is a no-op (it never clears global expectations). Because the event log is not namespaced, a namespace-scoped `all` clear deliberately leaves the request log untouched.
+- `PUT /mockserver/retrieve?type=active_expectations&namespace=T` returns only namespace `T`'s expectations plus global ones (other tenants hidden).
+- `PUT /mockserver/reset` with no namespace stays a full reset (unchanged semantics).
+- The metadata, `unmatched` and paging filters (`ExpectationFilter`) combine with the namespace filter. On clear, when one of them is present, the namespace is ANDed with the body and the other filters instead of taking precedence. See [domain-model.md](domain-model.md#metadata-metadata-and-control-plane-housekeeping-filters).
+
+All of the matching/clearing logic lives in `mockserver-core` (`Expectation`, `ExpectationDTO`, `RequestMatchers`, `HttpState`, `Configuration`/`ConfigurationProperties`); the Netty layer needs no change because it already passes all request headers through. The `namespace` field round-trips through `ExpectationDTO`, the expectation JSON Schema (`expectation.json`), the embedded OpenAPI model, and the Java-code serializer.
+
+### Debug Mismatch Endpoint
+
+The `PUT /mockserver/debugMismatch` endpoint (implemented in `HttpState.debugMismatch()`) provides programmatic access to match analysis. It accepts a `RequestDefinition` body and returns structured JSON showing per-expectation, per-field match results ranked by closeness (fewest differing fields first), with the closest match highlighted and actionable `remediation` hints for each mismatched field. The MCP `debug_request_mismatch` tool delegates to this same implementation and adds ranking/remediation post-processing. The Java client exposes this via `MockServerClient.debugMismatch(RequestDefinition)`.
+
+### Explain Unmatched Endpoint
+
+The `PUT /mockserver/explainUnmatched` endpoint (implemented in `HttpState.explainUnmatched()`) provides a post-hoc diagnostic for requests that have already been received and returned 404. It retrieves recent `NO_MATCH_RESPONSE` log entries from `MockServerEventLog.retrieveUnmatchedRequests()`, which leaves out failed forwards and proxies (their `502` shares the type; `explain_forward_failure` covers them), and for each, computes ranked closest-expectation diagnostics using `MatchDifference` with `MismatchRemediation` hints. The optional request body accepts `{"limit": N}` (default 10, max 100). The MCP `explain_unmatched_requests` tool and `mockserver://unmatched` resource both delegate to this implementation.
+
+**Suggested fixes.** With `{"suggestFixes": true}` each of the five closest non-matching expectations (`EXPLAIN_UNMATCHED_FIXES_PER_REQUEST`) also carries a `suggestedFix`, built by `ExpectationFixSuggester` from the fields `compareFields` reported as differing. It is computed on demand only, and never applied: the dashboard applies it, on an explicit click, through `PUT /mockserver/expectation`. The MCP `suggest_expectation_fix` tool asks for the fixes and keeps only the expectations that carry one.
+
+- **Patch shape.** An RFC 6902 patch of the expectation as `PUT /mockserver/retrieve?type=active_expectations` returns it, touching only `/httpRequest`. Each `replace` and `remove` is preceded by a `test` of the current value, and an object that gains a member by a `test` of that whole object (an `add` would otherwise overwrite a member added since), so the patch fails to apply once anything it changes has been edited. Arrays are replaced whole; the operations are `add`, `remove`, `replace` and `test`.
+- **Per field.** Method, path, `secure`, `keepAlive` and `protocol` take the request's value (a path fix also drops `pathParameters`, which a literal path no longer defines). Headers, query and path parameters and cookies are fixed entry by entry: an entry the request satisfies on its own is kept, one it contradicts gets the request's values for that name when that satisfies it, and is removed otherwise. A JSON body matched on its listed fields keeps its structure, takes the request's value where they contradict, drops fields the request lacks and keeps `${json-unit.*}` placeholders; a `STRICT` or non-JSON body is replaced by the request's body; a missing request body or a negated body matcher removes the body matcher. Other fields (`clientCertificate`, `jwt`, `clientIp`, `operation`, `openapi`, DNS, binary) are listed in `unpatchedFields` with a reason, as is an expectation that is not an `HttpRequest` matcher (for example an OpenAPI operation).
+- **Safety.** A field whose operations would carry a value the event-log redactor treats as sensitive (any string, number or boolean in an operation, or a member name) is not patched (`unpatchedFields` says so), and a body truncated by `maxLoggedBodyBytes` or larger than 64 KiB is not copied. `matchesAfterPatch` reads the patched request matcher back from JSON with `RequestDefinitionSerializer`, as `PUT /mockserver/expectation` would, and matches it against the request with a suppressed `MatchDifference`, so no match event is written.
+
+### Explain Endpoint
+
+`PUT /mockserver/explain?correlationId=<id>` (or a body `{"correlationId":"<id>"}`) answers "why did this request match X, or nothing, instead of Y?". It is recomputed on demand: nothing is recorded per request, so it adds no work to the serving path.
+
+```mermaid
+flowchart LR
+    Q["PUT /mockserver/explain\n?correlationId="] --> L["event log entries\nwith that correlationId"]
+    L --> R["recorded request\n(RECEIVED_REQUEST first)"]
+    L --> A["atArrival outcome\n(expectationId on\nEXPECTATION_RESPONSE /\nFORWARDED_REQUEST)"]
+    R --> W["RequestMatchExplainer.explain\nwalk sorted expectations,\nserving-path gates"]
+    W --> J["JSON: matched, skipped\n(reason), shadowed"]
+    A --> J
+```
+
+- **Lookup.** `HttpState.explain` reads the entries for the correlation id with `MockServerEventLog.retrieveLogEntriesByCorrelationId` (the scan runs off the event-log consumer thread) and evaluates on the calling thread. The request comes from the `RECEIVED_REQUEST` entry, else from an `EXPECTATION_RESPONSE`, `FORWARDED_REQUEST` or `NO_MATCH_RESPONSE` entry. No such entry gives `404`; no correlation id gives `400`; a non-HTTP request gives `400`.
+- **Outcome at arrival.** `MATCHED` (an `EXPECTATION_RESPONSE` or `FORWARDED_REQUEST` carrying an expectation id), `NO_MATCH`, `FORWARDED_WITHOUT_EXPECTATION` (proxied), `RESPONDED_WITHOUT_EXPECTATION` (CRUD, stored LLM responses) or `UNKNOWN` (`NO_MATCH_RESPONSE` is only kept at INFO and finer). `sameOutcomeAsAtArrival` compares that with the recomputed winner, and `expectationStillStored` says whether the expectation that served it is still in the store.
+- **Failed forwards.** A forward's `502` is logged as a `NO_MATCH_RESPONSE` with `FORWARD_FAILURE_MESSAGE_FORMAT`; `HttpActionHandler` stamps it with the id of the expectation whose forward failed (taken from the served action, which `Expectation` stamps). `explain` therefore reports `MATCHED` with that id, or `FORWARDED_WITHOUT_EXPECTATION` for an unmatched request whose proxy failed, never `NO_MATCH`, and adds `atArrival.forwardFailure` (status, reason, `causeNamed`, `forwardLoopSuspected`), built by `ForwardFailureExplainer` as `explain_forward_failure` builds it. A REQUEST-phase breakpoint whose continuation throws gets the same treatment: `attemptRequestBreakpoint` receives the matched action's expectation id from `dispatchForwardWithBreakpoint` and `dispatchMockResponseWithBreakpoint`, and `null` on the unmatched-404 path, so the 502 is explained against the expectation that matched, or not at all.
+- **Walk.** `RequestMatchExplainer.explain` iterates `RequestMatchers.sortedRequestMatchers()` (the sorted snapshot the serving path uses, inactive matchers included, no lazy removal scheduled) and applies the serving path's gates in its order: namespace, active (`Times` / time to live), request fields, LLM conversation predicates, scenario state, percentage. The first expectation that passes every gate is `matchedExpectation`; each one before it is in `skippedExpectations` with `reason` (`NAMESPACE`, `INACTIVE`, `FIELDS_DIFFER`, `NOT_OPERATOR`, `CONVERSATION`, `SCENARIO_STATE`, `PERCENTAGE`) and an `explanation`; later expectations that also match are `shadowedExpectations` (`LOWER_PRIORITY`). A percentage below 100 is a coin toss on the serving path, so such an expectation is reported, not chosen. With no winner, `closestExpectationId` is the first expectation with the fewest differing fields. A `not(...)` request matcher fails exactly when every inner field matches, so it is reported as `NOT_OPERATOR` and never counted as the closest (it differs on no field, but is the farthest candidate).
+- **Field comparison** is `RequestMatchExplainer.compareFields`, the same per-expectation node `explainUnmatched` returns (`collectAllDifferences`, `suppressMatchResultLogging`, `MismatchRemediation` hints). It runs on a clone, so no `Times` is consumed, no scenario moves and no match event is written.
+- **Redaction.** Differences, hints and explanations are scrubbed with the request's sensitive values from `LogEntry.eventLogRedactor`, as `explainUnmatched` does.
+- **Staleness.** `RequestMatchers.markMatchersModified` records `lastModifiedEpochMillis`; `expectationsChangedSince` is true when that is at or after the request's `epochTime` (a change in the same millisecond counts as a change). Scenario states and remaining `Times` are always read as they are now. A body truncated by `maxLoggedBodyBytes` (the `x-mockserver-body-truncated` header) is flagged as `request.bodyTruncated`, and that header is removed before matching.
+- **Drift guard.** The gate order is a copy of the serving loop in `RequestMatchers.firstMatchingExpectationWithParsedBodyCache`. `RequestMatchExplainerGateOrderGuardTest` reads both loops' source and fails when a gate is added, removed or reordered in either (it also counts the serving loop's `continue` skips), and runs differential cases (several gates failing at once, `not(...)` matchers) asserting the explainer's winner equals what the serving path then serves.
+- **Response schema.** The OpenAPI spec documents the 200 body as `RequestExplanation` / `ExplainedExpectation`; `HttpStateExplainRequestTest.shouldReturnExactlyTheFieldsTheOpenApiSchemaDocuments` fails when a returned field is undocumented or a documented field is never returned.
+- **Clients.** The dashboard's log-group **Explain** action and the Java client's typed `MockServerClient.explain(correlationId)` (returning `RequestExplanation`) call this endpoint; the other clients call it as plain REST.
+- **Budget.** At most `EXPLAIN_REQUEST_EVALUATION_BUDGET` (500) expectations are evaluated; `truncated` and `maxExpectationsEvaluated` report the cut.
+- **Route.** The route is registered only under `/mockserver/explain`, with no bare `/explain` alias, so it cannot shadow a user's own `PUT /explain` mock. It is a read for control-plane authorisation.
+- **MCP.** The `explain_request` tool calls `HttpState.explain` with the correlation id as a query parameter and returns its JSON; a non-200 answer becomes a tool error (`isError`) carrying the endpoint's message. Its output is redacted exactly as the endpoint's is.
+- **Narration (`?narrate=true`).** On this endpoint and `explainUnmatched`, `HttpState.explainWithOptionalNarration` / `explainUnmatchedWithOptionalNarration` compute the deterministic answer as above, then, only when `llmExplainNarrationEnabled` (default `false`, read from the `Configuration` instance per call) is on, `org.mockserver.llm.ExplanationNarrator` asks the LLM backend that `LifeCycle` installed for `/generateExpectation` for a short summary and adds it as `narration` (`available`, `aiGenerated`, `label`, `provider`, `model`, `text` capped at 4,000 characters including its marker, or `available: false` with a `reason`; disabled names the property). The facts are unchanged; a non-200 answer is returned without narration. The call runs on the narrator's own two daemon threads (a third concurrent request is answered at once as unavailable), and the response future completes as unavailable after the backend's timeout (`llmRequestTimeoutMillis`) plus a 2-second grace, so the dispatch writes the response, on the scheduler rather than the JDK's shared delay thread, when the future completes and never blocks the event loop; a WAR deployment joins it, as `/template/test` does. The prompt is the facts minus `timestamp` and `correlationId`; every string is scrubbed of the credential values the recorded requests and the first 500 (explain) or 50 (explainUnmatched) expectation matchers carry (`LlmPromptRedactor.sensitiveValues`, always on) and passed through `LlmPromptRedactor.redactText` before it is capped at 500 characters, so a cut never splits an unmasked JWT; the whole is then redacted again and capped at 16,000 characters. `explainUnmatched` hands its explained requests over only through its completed future, so a timed-out event-log callback cannot race the caller. No backend gives `available: false`, never an error. The MCP `explain_request` and `explain_unmatched_requests` tools do not narrate: their caller is already an LLM. `HttpStateExplainNarrationTest` (including the prompt-redaction case), `ExplanationNarratorTest` (timeout, busy, empty answer) and `ExplainNarrationIntegrationTest` (a second MockServer as the OpenAI endpoint) cover it.
+
+### Expectation Lint
+
+Lint finds expectations that can never match, or will not match the way they read. It is advisory: it never rejects or changes an expectation, and it adds nothing to the per-request path. `ExpectationLinter` (`org.mockserver.mock`) holds every rule; four surfaces call it.
+
+```mermaid
+flowchart LR
+    P["PUT /mockserver/expectation"] --> E["per-expectation rules
+warnings only"]
+    E --> H["x-mockserver-lint-warnings header
++ one WARN log entry"]
+    L["PUT /mockserver/lint"] --> B{"body?"}
+    B -- "expectations" --> J["lintJson: rules + DUPLICATE_ID
++ shadowing, nothing stored"]
+    B -- "empty" --> S["lintStored: active expectations
+in serving order + shadowing"]
+    C["mockserver lint file..."] --> J
+    F["initializationJsonPath load
+and --watch reload"] --> O["adviseOnLoad: rules + DUPLICATE_ID + shadowing
+warnings only, one WARN per file"]
+```
+
+| Rule | Severity | Finding |
+|---|---|---|
+| `INVALID_EXPECTATION` | ERROR | the entry fails schema validation, so `PUT /mockserver/expectation` would reject it (body and CLI only) |
+| `DUPLICATE_ID` | WARNING | a later entry with the same id is the one the store keeps (body, CLI and on load): `PUT /mockserver/expectation` upserts each entry in turn, and `RequestMatchers.update`, which loads each initialisation file, keeps the last entry for an id, as does a later file's load; the message says whether a later entry in the same file or a later file replaces it |
+| `SHADOWED` | WARNING | an expectation evaluated earlier always matches first |
+| `TIMES_ZERO`, `TIME_TO_LIVE_ZERO`, `PERCENTAGE_ZERO` | WARNING | the expectation can never be served |
+| `UNREACHABLE_RESPONSES` | WARNING | `SEQUENTIAL` or `SWITCH` `httpResponses` that limited `times` never reach |
+| `PATH_MISSING_LEADING_SLASH`, `PATH_INCLUDES_SCHEME_AND_HOST`, `PATH_INCLUDES_QUERY_STRING`, `PATH_GLOB_WILDCARD`, `PATH_TEMPLATE_WITHOUT_PATH_PARAMETERS` | WARNING | the path cannot match the request it describes |
+| `METHOD_TYPO`, `HEADER_NAME_TYPO` | WARNING | an unknown method or header name within edit distance 1 (optimal string alignment) of a known one, or a known header written with `_`; a header that is a known name with a prefix added or removed (`X-Authorization`, `Request-Id`) is a custom header, not a typo |
+| `STRICT_JSON_BODY_WITH_ARRAYS` | INFO | `STRICT` JSON matching of a body with arrays needs the same order and no extra items |
+
+- **On PUT.** `HttpState` passes the upserted expectations to `ExpectationLinter.adviseOnUpsert`, which runs only the per-expectation rules (linear in the expectations sent) and drops `INFO`. If any remain it adds `x-mockserver-lint-warnings: <count>` to the `201` and logs one `WARN` entry listing the first 20. Shadowing is not checked here: it is pairwise.
+- **On load.** `ExpectationInitializerLoader.retrieveExpectationsFromFile`, which serves both the start-up load of each `initializationJsonPath` file and every `--watch` reload, passes the file's valid expectations to `ExpectationLinter.adviseOnLoad` before storing them. It runs the per-expectation rules (dropping `INFO`) and the budgeted shadowing check over that file alone, sorted by priority then file position, after dropping each entry whose id a later entry repeats (reported as `DUPLICATE_ID`), because `RequestMatchers.update` keeps only the last entry for an id, served from the first entry's place, and logs one `WARN` entry naming the file and listing the first 20 problems, plus a line when the shadowing budget ran out. Every `--watch` change reloads every watched path, and with `persistedExpectationsPath` set to the watched file every `PUT` does too, so the loader keeps a digest of the problems last logged per path (at most 1,000 paths) and stays quiet while they are unchanged. Ids the loader generated are left out of the messages, which name those expectations by method and path. It is skipped when `WARN` is not enabled, and any `Throwable` inside it is logged and never stops the file loading. Shadowing runs here because a load happens once per file change, off the request path, and the check is bounded by the budgets below; an initialisation file is where a catch-all listed above a specific expectation goes unnoticed. `INVALID_EXPECTATION` is not repeated (the loader already logs each entry it skips), and class and OpenAPI initialisers are not linted.
+- **Shadowing.** An earlier expectation shadows a later one only when nothing can pass it over (unlimited `times` and time to live, no scenario state requirement, no percentage below 100, no LLM conversation predicates, the same namespace: the gates `RequestMatchExplainer` walks; and the later one is not `respondBeforeBody` unless the earlier one is too, because `RequestMatchers.firstMatchingEarlyExpectation` serves those first) and every request constraint it has is provably weaker: a blank or equal field, a subset of equal header, query, cookie and path-parameter entries with the same key-match style, an equal body, and for method and path either `.*` or a regex that fully matches the later expectation's literal value. Anything it cannot prove counts as not covering, so it misses some shadowing but never reports a reachable expectation. `NottableString.equals` treats a schema as matching a value, so values are compared by class, `not`, `optional` and text instead.
+- **Serving order.** Stored expectations come from `RequestMatchers.sortedRequestMatchers()`; inactive ones are skipped and counted. Body and file entries are sorted by priority, then by their position, which is the order an upsert creates them in; an entry kept for a duplicate id takes the first entry's position, because an update in place keeps the original's creation time. OpenAPI entries (`specUrlOrPayload`) are skipped, not expanded, so lint never fetches a specification.
+- **Budgets.** A literal-path expectation is compared only with later expectations that have the same path text; others are compared with every later one, and an expectation already found shadowed is never used as the earlier side. Every candidate visited counts against `MAX_PAIR_COMPARISONS` (100,000), so the shadowing work is bounded however many expectations are sent or stored. A user regex runs over a counting `CharSequence` capped at 100,000 character reads per match and 2,000,000 per lint, so catastrophic backtracking ends as "does not cover". `java.util.regex` recurses once per repetition for patterns such as `(a|b)*`, so a long enough literal value can overflow the stack before either budget ends: `RegexBudget.matches` catches the `StackOverflowError` and that pair also counts as "does not cover" (`Pattern.compile` already turns its own overflow into a `PatternSyntaxException`). `shadowCheckTruncated` reports either cut; at most 1,000 issues are listed (`issuesTruncated`).
+- **Route.** Registered only under `/mockserver/lint`, with no bare alias, and a read for control-plane authorisation: it stores nothing, even when sent expectations. A body that is not JSON, or not an object or array, is a `400`.
+- **MCP.** The `lint_expectations` tool calls `HttpState.lint` with the `expectations` argument as the body (or none, for the stored expectations) and returns its JSON, keeping at most `maxIssues` issues, errors first.
+- **CLI.** `mockserver lint <file>...` (`Main.LintCommand`) parses each file, lints all entries together in the order given through `lintInitializationFileEntries`, so `DUPLICATE_ID` says whether the same file or a later file replaces an entry, and maps each issue back to its file and index. It needs no server. See [cli.md](cli.md).
+
+### Request Replay
+
+`PUT /mockserver/replay` re-issues a previously recorded or proxied request to its upstream target and returns the upstream response through the control plane. The primary use case is the Traffic-view **Replay** button in the dashboard, which lets a developer resend a captured request to see whether the real service has changed behaviour. The Java client exposes this as `MockServerClient.replay(HttpRequest)`.
+
+**Architecture:** The feature is split across two modules to avoid a circular dependency. `HttpState` (in `mockserver-core`) defines the endpoint and holds a `Function<HttpRequest, CompletableFuture<HttpResponse>> replayHandler` field. `HttpRequestHandler` (in `mockserver-netty`) wires the handler at startup: `httpState.setReplayHandler(req -> httpActionHandler.getHttpClient().sendRequest(req))`. The WAR deployment does not wire this handler; calling the endpoint from a WAR returns 501.
+
+**Target resolution:** The host is resolved from `socketAddress.host` (if set in the JSON) or the `Host` header, mirroring the normal forward path.
+
+**Safety hardening:**
+
+| Check | Behaviour on failure |
+|-------|---------------------|
+| Body too large (request > 10 MB) | 413 Payload Too Large |
+| Upstream response too large (> 10 MB) | 502 with error message |
+| Target host blocked by SSRF policy (`InetAddressValidator.validateForwardTarget`) | 403 Forbidden |
+| No handler wired (WAR deployment) | 501 Not Implemented |
+| Upstream connection error / timeout | 502 Bad Gateway |
+
+The 10 MB cap (`REPLAY_MAX_BODY_SIZE`) is applied to both the outbound request body and the returned upstream response body to prevent OOM from materializing and JSON-serializing an unbounded body.
+
+The endpoint goes through `controlPlaneRequestAuthenticated()` — mTLS / JWT restrictions apply.
+
+### Record-to-Expectations (MCP)
+
+The `create_expectations_from_recorded_traffic` MCP tool converts `FORWARDED_REQUEST` log entries into active mock expectations. It reuses the existing `RECORDED_EXPECTATIONS` retrieve mechanism (`MockServerEventLog.retrieveRecordedExpectations()` which filters for `FORWARDED_REQUEST` entries and maps them to `Expectation` objects via `LogEntry.getExpectation()`). The tool deserializes the retrieved expectations, upgrades them from `Times.once()` to `Times.unlimited()` for persistent mocking, and adds them via `HttpState.add()`. Optional `method` and `path` parameters filter the recorded traffic, and `preview=true` returns the expectations as JSON without activating them.
+
+### Record-to-Expectations (REST) — Consolidation & Promotion
+
+`PUT /mockserver/recordings/promote` is the REST equivalent of the MCP tool above. It takes an optional request-matcher filter in the JSON body (empty body = all recorded traffic), **redacts secrets first** (`ImportRedaction`, on by default), **consolidates/parameterizes** the recorded traffic (`RecordedExpectationPostProcessor.consolidate()`; `?consolidate` / `?parameterize`, both on by default — `?consolidate=false` promotes verbatim but still upgraded to `Times.unlimited()`), then **activates** the result via `HttpState.add()` and returns it as `201 Created`.
+
+Unlike the raw MCP tool (a verbatim 1:1 dump — 50 hits to `GET /users/123` become 50 brittle `Times.once()` expectations), `consolidate()` collapses exchanges by request shape into a single `Times.unlimited()` expectation, infers `/users/{id}` path parameters from varying id segments, strips volatile request headers (reusing `HarImporter.volatileRequestHeaders()`), and sequences differing responses for the same request shape into one `ResponseMode.SEQUENTIAL` multi-response expectation. The same engine is exposed on the retrieve path (`?type=RECORDED_EXPECTATIONS&consolidate=true[&parameterize=true]`) and on HAR import (`?format=har&consolidate=true`); see [event-system.md → Record &rarr; Mock](event-system.md#record--mock-consolidation-promotion-har-import) for the full model. Default retrieve output (no query parameter, config flag off) is unchanged.
+
+**Transport headers never become matchers.** `MockServerEventLog.retrieveRecordedExpectations` maps each `FORWARDED_REQUEST` entry through `TransportHeaderFilter.withoutTransportHeaders` (`mockserver-core/.../filters/TransportHeaderFilter.java`), so every surface that turns recorded traffic into expectations (retrieve `RECORDED_EXPECTATIONS` in every format, verbatim or consolidated promote, the MCP `record_llm_fixtures` cassette and `create_expectations_from_recorded_traffic` tools, and `persistRecordedExpectations`) drops `Content-Length`, the RFC 9110 hop-by-hop headers (`Connection` and any header it nominates, `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`) and every `Proxy-*` header. `Host` is kept, so recordings of two upstreams that share a path stay distinct in `RECORDED_EXPECTATIONS` output, cassettes and persisted recordings. Promotion (`HttpState.promoteRecordings`, behind `PUT /mockserver/recordings/promote`, the dashboard's Promote to Mocks and the `promote_recordings` MCP tool) and the `create_expectations_from_recorded_traffic` MCP tool (preview included) also drop `Host` (`withoutTransportHeaders(expectation, true)`), verbatim or consolidated, because a promoted mock serves applications that call MockServer directly with their own `Host`; consolidation dropped it already, via `HarImporter.volatileRequestHeaders()`. A clone is returned, so the log entry and the `REQUESTS` / `REQUEST_RESPONSES` views keep every header. `RecordedExpectationPostProcessor.consolidate` applies the same transport rule on top of the HAR set, so a consolidated HAR import drops them too. Without it a mock promoted from `curl -x` traffic required `Proxy-Connection`, and a cassette recorded by one client pinned its `Connection` and `content-length`, so another client got a 404.
+
+### Migration Importers (WireMock / Mountebank / Mockoon)
+
+**Outcome.** `PUT /mockserver/import` converts a competitor mock tool's stub definitions into MockServer expectations in one request, so a team can migrate off a stagnating tool without hand-rewriting stubs. Three formats join the existing HAR/Postman/Pact importers, each selected by `?format=` or auto-detected from the JSON shape, and each surfacing a **structured warning per unmappable construct** so nothing is silently dropped.
+
+| `?format=` | Importer (`org.mockserver.imports`) | Source shape (auto-detect key) |
+|-----------|-------------------------------------|--------------------------------|
+| `wiremock` | `WireMockImporter` | single stub, `mappings[]`, or bare array (`mappings`, `request.urlPath/urlPattern`, `response.jsonBody/fault`) |
+| `mountebank` | `MountebankImporter` | imposter, `imposters[]`, or bare array (`imposters`, or `protocol`+`stubs`) |
+| `mockoon` | `MockoonImporter` | environment export (`routes[]`) |
+
+```mermaid
+flowchart LR
+    BODY["import body\n(?format or auto-detect)"] --> IMP["WireMock / Mountebank / Mockoon\nImporter.importExpectations()"]
+    IMP --> RES["ImportResult\nexpectations + warnings"]
+    RES --> RED["ImportRedaction\n.redactPreservingActions()"]
+    RED --> ADD["HttpState.add()"]
+    ADD --> BODYOUT["201 body\n{ expectations, warnings }"]
+```
+
+**Model.** Each importer returns an `ImportResult` (`List<Expectation>` + `List<ImportWarning>`); an `ImportWarning` carries `item` (source locator, e.g. `stub[2]`), `construct` (the foreign construct), and `detail`. The three new formats return their result body as `{ "expectations": [...], "warnings": [...] }` (the legacy HAR/Postman/Pact formats keep returning a bare expectation array). `HttpState` handles all six formats in the same `PUT /mockserver/import` branch.
+
+**Redaction.** The migration importers redact through `ImportRedaction.redactPreservingActions(...)` rather than the shared `ImportRedaction.redact(...)`. The wholesale `redact(...)` (used by HAR/Postman) rebuilds each expectation through `FixtureRedactor.redact(...)`, which only carries over *response* actions and resets `Times`/`TimeToLive` — lossy for the migration importers, which also emit `httpForward` (proxy), `httpError` (fault), sequential/random multi-responses, and `Times` (Mountebank `repeat`). `redactPreservingActions(...)` redacts the request and each response individually via the granular `FixtureRedactor.redactRequestDefinition`/`redactResponseObject` clones and re-attaches them to a rebuilt expectation that keeps the original action type (including a response template), `Times`, `TimeToLive`, priority, id, scenario state, response mode and after-actions (whose webhook requests are redacted). Because `FixtureRedactor` rewrites any JSON-looking body as a plain string, it rebuilds a JSON, substring, XML or binary matcher around the redacted value (keeping its match type, `not`, `optional` and content type), keeps XPath, JsonPath and regex matchers as written (their text form is a descriptor, not content), and keeps a response `FileBody` rather than inlining the file. A response template's text is out of its reach, so `WireMockImporter` redacts the response through `ImportRedaction.redactResponse` before serialising it into the template. Given locators and a warning list, `redactPreservingActions` warns about each request body matcher that redaction masked (it then matches only the placeholder), and about each kept expression or non-JSON fragment that mentions a sensitive field. `WireMockImporter` masks a `matchesXPath` `equalTo`/`contains` literal itself when the selector names a sensitive field.
+
+**Coverage & boundaries.** The mappings are documented per importer in the Javadoc of each class and in the [Importing Expectations](https://www.mock-server.com/mock_server/importing_expectations.html) consumer page. WireMock `matchesXPath`/`equalToXml`, `delayDistribution`, `chunkedDribbleDelay`, faults (`CONNECTION_RESET_BY_PEER` as a `resetConnection` TCP reset), `bodyFileName` (resolved inside the `filesDirectory` query parameter), webhooks and simple `response-template` references (translated to Mustache by `WireMockTemplateTranslator`) map onto native features; all mapping happens at import time, so serving an imported expectation uses only existing response paths. Notable boundaries reported as warnings rather than dropped: WireMock Handlebars helpers, custom transformers, `metadata`; Mountebank `tcp`/`smtp` imposters, `and`/`or`/`not` compound predicates, JavaScript `inject`; Mockoon `crud` route type, cookie/path rule targets, `null`/`empty_array` rule operators, and `OR`-combined rules (only the first rule maps).
+
+### LLM Record/Replay (MCP)
+
+The `record_llm_fixtures` MCP tool extends the record-to-expectations workflow for LLM/MCP traffic. After retrieving `RECORDED_EXPECTATIONS`, it applies two additional processing steps:
+
+1. **SSE-aware conversion** (`SseAwareExpectationConverter`) -- detects streaming responses (via `x-mockserver-streamed` header or `text/event-stream` content type) and converts them from static `HttpResponse` to `HttpSseResponse` actions by parsing the captured SSE body into `SseEvent` objects. Truncated captures fall back to static responses with a warning header.
+
+2. **Secret redaction** (`FixtureRedactor`) -- replaces sensitive header values (Authorization, api-key, Cookie, etc.) with `***REDACTED***` so fixture files are safe to commit to version control.
+
+The redacted, SSE-aware expectations are serialized to a JSON file that can be loaded with `load_expectations_from_file` or via `initializationJsonPath` for deterministic replay.
+
+### OpenAPI Contract Verification (MCP)
+
+Two MCP tools provide OpenAPI contract verification:
+
+- **`verify_traffic_against_openapi`** (passive) — retrieves recorded `REQUEST_RESPONSES` from the event log, then validates each request/response pair against an OpenAPI spec using `OpenApiTrafficValidator` (which delegates to `OpenAPIRequestValidator` and `OpenAPIResponseValidator`). Returns a structured per-pair conformance report with request and response validation errors.
+
+- **`run_contract_test`** (active) — parses the OpenAPI spec, builds example requests for each operation using `OpenApiContractTest` (path parameters resolved from spec examples/schema defaults, query parameters, headers, and request bodies generated via `ExampleBuilder`), sends them to a specified base URL via `java.net.HttpURLConnection`, and validates each response with `OpenAPIResponseValidator`. Returns per-operation pass/fail results.
+
+All three tools are registered in `McpToolRegistry` and support filtering (by method/path for traffic verification, by operationId for contract and resiliency tests). The two active tools, and `run_mcp_contract_test`, apply `forwardProxyBlockPrivateNetworks` to the base URL's host before sending and again for each request (see [tls-and-security.md](tls-and-security.md#forward-target-ssrf-validation)).
+
+- **`run_resiliency_test`** (active, negative) -- parses the OpenAPI spec, builds valid example requests using `OpenApiContractTest.buildExampleRequest()`, then generates a bounded mutation catalogue per operation using `OpenApiResiliencyTest` (omitting required fields, type violations, numeric/string boundary violations, oversized strings, malformed JSON). Each mutated request is sent to the target service via `java.net.HttpURLConnection` with a 5-second timeout. Responses are classified as `HANDLED` (4xx) or `UNEXPECTED` (5xx, 2xx, connection error). Returns per-mutation results and per-operation/overall summaries.
+
+```mermaid
+flowchart LR
+    subgraph "Passive Verification"
+        LOG["Event Log\nREQUEST_RESPONSES"] --> TV["OpenApiTrafficValidator"]
+        TV --> RV["OpenAPIRequestValidator"]
+        TV --> RSV["OpenAPIResponseValidator"]
+    end
+
+    subgraph "Active Contract Testing"
+        SPEC["OpenAPI Spec"] --> CT["OpenApiContractTest"]
+        CT --> EB["ExampleBuilder\n(request generation)"]
+        CT --> HTTP["HttpURLConnection\n(send request)"]
+        HTTP --> RSV2["OpenAPIResponseValidator"]
+    end
+
+    subgraph "Resiliency Testing"
+        SPEC2["OpenAPI Spec"] --> RT["OpenApiResiliencyTest"]
+        RT --> CT2["OpenApiContractTest\n(example request)"]
+        RT --> MUT["Mutation Generator"]
+        MUT --> HTTP2["HttpURLConnection\n(send mutated request)"]
+        HTTP2 --> CLS["Classify: HANDLED vs UNEXPECTED"]
+    end
+```
+
+### Correlation ID Retrieval
+
+All log entries for a single incoming HTTP request share the same `correlationId` (a UUID assigned in `HttpState.handle()`). The `PUT /mockserver/retrieve?type=LOGS&correlationId=<id>` endpoint retrieves all log entries for a specific correlation ID, enabling request-to-match-attempts correlation. The Java client exposes this via `MockServerClient.retrieveLogsByCorrelationId(String)`, and the dedicated MCP `retrieve_logs` tool (as well as the generic `raw_retrieve` tool) supports a `correlationId` parameter.
+
+### Typed Log Entry Retrieval
+
+The `LOGS` retrieve type now supports `format=LOG_ENTRIES` to return structured `LogEntry[]` JSON instead of plain text. This enables typed programmatic access to log entries in the Java client:
+
+- `MockServerClient.retrieveLogEntries(RequestDefinition)` — returns `LogEntry[]` matching a request pattern
+- `MockServerClient.retrieveLogEntriesByCorrelationId(String)` — returns `LogEntry[]` for a specific correlation ID
+- `MockServerClient.retrieveLogEntries(RequestDefinition, long, long)` — time-filtered variant using epoch milliseconds
+
+Deserialization is handled by `LogEntrySerializer.deserializeArray()` using Jackson's `ObjectMapper.readValue()` directly against the `LogEntry` class. Fields that survive the round-trip: `logLevel`, `epochTime`, `timestamp`, `type`, `correlationId`, `port`, `expectationId`, `messageFormat`, `arguments`, `because`. An argument that is the entry's own request or response arrives as its compact string (`GET /path`, `200`), so `getMessage()` re-rendered on the client quotes it in that form; the full request is in the JSON's `httpRequest`, which is not deserialized. Fields serialized by the custom `LogEntrySerializer` but NOT deserialized (returned as `null`): `httpRequest`, `httpResponse`, `httpError`, `expectation`, `throwable` — their setters are `@JsonIgnore` because the types (`RequestDefinition`, `Expectation`) lack default constructors needed for Jackson deserialization.
+
+> **Recorded-request retrieval and `rawBytes` serialization.** `RequestDefinitionSerializer.retrieveRequests(...)` serializes the recorded `HttpRequest` list using `objectWriter.withAttribute("emitRawBytes", Boolean.TRUE)`. The body serializers `JsonBodySerializer` and `JsonBodyDTOSerializer` gate emission of the base64 `rawBytes` field on this per-call Jackson `SerializerProvider` attribute; the attribute is absent on the normal write path so raw bytes are never emitted there. This ensures that a request body whose on-wire bytes differ from the canonical JSON representation (for example, a body with unconventional whitespace) round-trips faithfully when retrieved via `PUT /mockserver/retrieve?type=REQUESTS`.
+
+> **Mock response body encoding (double-gzip prevention).** `MockServerHttpResponseToFullHttpResponse.getBody()` writes the mock response body bytes verbatim to the wire. Unlike the forward path — where the inbound decompressor decodes a `Content-Encoding` body, so a forwarded request is sent as its original wire bytes or, if changed, encoded again (see [Bodies with a Content-Encoding](#bodies-with-a-content-encoding)) — a mock response is never re-encoded. The `Content-Encoding` header is emitted as-is from the expectation, giving callers byte-level control over the response body with no risk of double-compression (issue #2375).
+
+```mermaid
+sequenceDiagram
+    participant AH as HttpActionHandler
+    participant RM as RequestMatchers
+    participant CI as CandidateIndex
+    participant Q as CircularPriorityQueue
+    participant M as HttpRequestPropertiesMatcher
+
+    AH->>RM: firstMatchingExpectation(request)
+    alt count < threshold OR blank/non-ASCII method/path
+        RM->>Q: toSortedList() (full linear scan)
+        Q-->>RM: all matchers in priority/time order
+    else count >= threshold AND concrete ASCII method/path
+        RM->>CI: candidatesInGlobalOrder(request, generation, caseInsensitive)
+        CI-->>RM: bucket(method+path) union fallthrough in sort order
+    end
+    loop For each candidate
+        RM->>M: matches(request)
+        M->>M: Check method, path, headers, body, etc.
+        alt Match found
+            M-->>RM: true
+            RM->>RM: postProcess(expectation)
+            Note over RM: Decrement Times counter. Remove if Times exhausted. Remove if TTL expired
+            RM-->>AH: Expectation
+        else No match
+            M-->>RM: false
+        end
+    end
+    RM-->>AH: null (no match)
+```
+
+### Protocol Matching and Verification
+
+`HttpRequestPropertiesMatcher` matches on the **negotiated protocol** a request arrived over, exposed
+as the `org.mockserver.model.Protocol` enum (`HTTP_1_1`, `HTTP_2`, `HTTP_3` — `HTTP_3` is experimental).
+An expectation built with `request().withProtocol(Protocol.HTTP_2)` only matches requests negotiated
+over HTTP/2; the same field on a `verify(...)` request asserts how a recorded request arrived. Protocol
+is **optional**: a `null` expectation protocol matches a request regardless of the request's protocol
+(`protocolMatcher` is built from `null` and the `ExactStringMatcher` treats that as match-any), so
+existing expectations that do not specify a protocol are unaffected.
+
+How the request's protocol is tagged (server-trusted, not client-supplied):
+
+| Arrival path | Tagged as | Where |
+|--------------|-----------|-------|
+| HTTP/1.1 (TCP) | `HTTP_1_1` (or `null` for mocking) | `FullHttpRequestToMockServerHttpRequest` |
+| HTTP/2 via ALPN (`h2`) | `HTTP_2` | ALPN negotiation in `PortUnificationHandler` |
+| HTTP/2 cleartext (`h2c`) | `HTTP_2` | `PortUnificationHandler` sets a trusted negotiated-protocol channel attribute (the `Upgrade` header alone is not trusted) |
+| HTTP/3 over QUIC (`h3`) | `HTTP_3` | `Http3RequestBridge.toHttpRequest` — the `h3` ALPN identifier is always trusted, so there is no header-spoofing concern |
+
+The `protocol` field round-trips through `HttpRequestDTO`, the request serializers
+(`HttpRequestSerializer` / `HttpRequestDTOSerializer`), `RequestDefinitionDTODeserializer`, the request
+JSON Schema (`protocol.json`), and the embedded OpenAPI model — and through the **pretty-printed
+retrieval DTO** (`HttpRequestPrettyPrintedDTO`), so a request retrieved via
+`retrieveRecordedRequests(...)` carries the protocol it arrived over for HTTP/2 and HTTP/3 alike.
+
+### Post-Processing
+
+After a match, `postProcess()`:
+1. Decrements the `Times` counter
+2. Checks if `Times` is exhausted → removes expectation
+3. Checks if `TimeToLive` has expired → removes expectation
+4. Notifies `MockServerMatcherListener`s of the change
+
+## Action Types
+
+Each `Expectation` binds a request matcher to exactly one action. There are 19 action types across two categories:
+
+### Response Actions
+
+| Type | Handler | Description |
+|------|---------|-------------|
+| `RESPONSE` | `HttpResponseActionHandler` | Returns a static `HttpResponse`. When the response body is a `FileBody` it is materialised — the file is read and its contents returned — verbatim when no `templateType` is set, or rendered as a template against the request when it carries a `templateType` (`VELOCITY`/`MUSTACHE`). Materialisation of a `FileBody` produced by *any* response path (callbacks, response templates, forward `responseOverride`) is centralised in `FileBodyMaterialiser`, invoked from the write funnels; a `RESPONSE` whose body is a `FileBody` is dispatched on the scheduler's file read pool, never on an event loop — see [Templated response body files](#templated-response-body-files-filebody--templatetype) |
+| `RESPONSE_TEMPLATE` | `HttpResponseTemplateActionHandler` | Evaluates a template (Velocity/Mustache/JavaScript) to generate the response. The template text may be supplied inline (`template`) or loaded from a file (`templateFile`); inline takes precedence — see `HttpTemplate.getTemplateContent()`. If the rendered output is not a valid `HttpResponse` (fails JSON-schema validation, or throws while transforming), `HttpTemplateOutputDeserializer` logs a request-correlated `TEMPLATE_GENERATION_FAILED` event carrying the validation error and the offending rendered output, and the action degrades to a `404 Not Found` (unchanged client semantics — the failure is surfaced in the log, not swallowed as a success-looking `EXPECTATION_RESPONSE`) |
+| `RESPONSE_CLASS_CALLBACK` | `HttpResponseClassCallbackActionHandler` | Loads a Java class implementing `ExpectationResponseCallback`, invokes `handle(request)` |
+| `RESPONSE_OBJECT_CALLBACK` | `HttpResponseObjectCallbackActionHandler` | Sends request to a WebSocket-connected client, awaits response callback |
+| `SSE_RESPONSE` | `HttpSseResponseActionHandler` | Streams Server-Sent Events with per-event delays, optional `closeConnection` flag. An optional `templateType` (`VELOCITY`/`MUSTACHE`/`JAVASCRIPT`) renders each event's `data` payload as a response template per event — see *Templated streaming payloads* below |
+| `WEBSOCKET_RESPONSE` | `HttpWebSocketResponseActionHandler` | Upgrades to WebSocket and sends a sequence of `WebSocketMessage` frames with per-message delays. An optional `templateType` renders each text frame per message (binary frames are never templated). When subprotocol is `graphql-transport-ws`/`graphql-ws` with a `graphqlSubscriptionFilter`, installs `GraphQLSubscriptionHandler` for the graphql-transport-ws protocol state machine |
+| `GRPC_STREAM_RESPONSE` | `GrpcStreamResponseActionHandler` | Streams gRPC-framed protobuf messages with per-message delays and grpc-status trailers (Netty only; returns 501 in WAR). A per-message `templateType` renders the message `json` as a response template before protobuf encoding |
+| `GRPC_BIDI_RESPONSE` | `GrpcBidiRouterHandler` / `GrpcBidiStreamHandler` | Bidirectional gRPC streaming via the multiplex pipeline (requires `grpcBidiStreamingEnabled=true`; returns 501 otherwise or in WAR) |
+| `BINARY_RESPONSE` | (inline in `BinaryRequestProxyingHandler`) | Returns raw binary bytes when a `BinaryRequestDefinition` matches. An HTTP request that matches one of these expectations instead gets `501 Not Implemented` (below, Binary/DNS actions and HTTP requests) |
+| `DNS_RESPONSE` | (inline in `DnsRequestHandler`) | Returns DNS response records when a `DnsRequestDefinition` matches a UDP DNS query. An HTTP request that matches one of these expectations instead gets `501 Not Implemented` (below) |
+
+#### Binary/DNS actions and HTTP requests
+
+**An HTTP request matched by a `BINARY_RESPONSE` or `DNS_RESPONSE` action gets `501 Not Implemented`, not silence.** Those two action types answer binary and DNS traffic; they have no HTTP response to give an HTTP request, so `HttpActionHandler.dispatchPrimaryActionInternal`'s switch has a dedicated `case BINARY_RESPONSE, DNS_RESPONSE` for exactly that case, instead of leaving such a request unanswered — the client would otherwise wait indefinitely, and so would any request pipelined behind it on the same HTTP/1.1 connection (see [netty-pipeline.md → HTTP/1.1 pipelining gate](netty-pipeline.md#http11-pipelining-gate), *wedge backstop*). The branch logs one `WARN` naming the action type and answers `501 Not Implemented` with a body of `the matched expectation's <TYPE> action cannot answer an HTTP request`, written through the normal `writeResponseActionResponse` path, so the exchange ends exactly as any other response does. The expectation still answers binary and DNS traffic normally; only an HTTP request matched against it differs.
+
+### How an Exchange Ends
+
+Every action type above ends its exchange one of four ways, which `Http1PipeliningGate` (HTTP/1.1 only) and `HttpExchangeTracker`/`HttpTransportTimer` (the idle timeout and transport-latency metrics, HTTP/1.1 only) rely on to know when the next request may be handled or the connection may be considered idle:
+
+| End | When |
+|---|---|
+| A terminal write completes | Every ordinary, streamed, chunked, forwarded, templated, callback, file, static-file, breakpoint-continued and `501` response — the overwhelming majority |
+| `HttpExchangeEndedEvent` | An exchange with no HTTP response at all: raw bytes (`error()` with `responseBytes`), an `error()` that writes nothing and keeps the connection open, or a final `1xx` other than `101` |
+| `101` written | The connection stops carrying HTTP/1.1; `Http1PipeliningGate` removes itself (CONNECT does the same through `HttpConnectHandler`/`SocksConnectHandler`) |
+| The connection is closed or reset with nothing written | `error()` with `dropConnection`/`resetConnection`, and chaos resets; these mark `ConnectionClosing` rather than ending the exchange through a write, so the exchange ends only when the connection itself closes (`channelInactive`), not through any of the three ends above |
+
+See [netty-pipeline.md → Inbound Connection Bounds](netty-pipeline.md#inbound-connection-bounds) for `HttpExchangeEndedEvent`'s two instances and who fires them, and [netty-pipeline.md → HTTP/1.1 pipelining gate](netty-pipeline.md#http11-pipelining-gate) for how the gate reads the same signals, plus the fourth, to release the next pipelined request.
+
+> **Concurrent writes to a shared `HttpResponse` are not safe** — writing from multiple threads simultaneously tears `KeysToMultiValues` header arrays (NPE / AIOOBE). In practice this is not reachable: the mock path clones the stored response per request before writing (`ResponseWriter.addConnectionHeader`), control-plane responses are built per request, and the dashboard communicates via WebSocket frames rather than shared response objects. `ResponseWriterConcurrencySafetyTest` guards the per-request-clone invariant on the mock path.
+
+### Forward Actions
+
+| Type | Handler | Description |
+|------|---------|-------------|
+| `FORWARD` | `HttpForwardActionHandler` | Forwards to a specified host:port:scheme. The connect path receives an `InetSocketAddress.createUnresolved` address so Netty's event-loop resolver performs DNS lookup off the calling thread rather than blocking it. |
+| `FORWARD_TEMPLATE` | `HttpForwardTemplateActionHandler` | Template generates the forwarding request |
+| `FORWARD_CLASS_CALLBACK` | `HttpForwardClassCallbackActionHandler` | Java class modifies the request before forwarding |
+| `FORWARD_OBJECT_CALLBACK` | `HttpForwardObjectCallbackActionHandler` | WebSocket client modifies request before forwarding |
+| `FORWARD_REPLACE` | `HttpOverrideForwardedRequestActionHandler` | Applies request/response overrides and modifiers |
+| `FORWARD_VALIDATE` | `HttpForwardValidateActionHandler` | Forwards and validates request/response against an OpenAPI spec |
+| `FORWARD_WITH_FALLBACK` | `HttpForwardWithFallbackActionHandler` | Forwards to upstream; returns a fallback mock response on 5xx or timeout |
+
+Every forward action sends through `HttpForwardAction.sendRequest`, which first applies `forwardProxyBlockPrivateNetworks` (`InetAddressValidator.validateForwardTarget`) to the destination and answers a refused one with `502` (see [tls-and-security.md](tls-and-security.md#forward-target-ssrf-validation)), then answers a request this MockServer has already forwarded `forwardLoopMaxHops` times with `508` (see [Loop Prevention](#loop-prevention)). `sendRequest` takes the request MockServer received as well as the one to forward, because a template or callback builds the forwarded request afresh.
+
+### Forward with Fallback
+
+The `FORWARD_WITH_FALLBACK` action combines MockServer's proxy and mock capabilities: it
+forwards the request to a real upstream service, but if the upstream returns a status code
+matching the fallback criteria (default: 500-599) or the connection fails/times out, a
+pre-configured fallback response is returned instead of the error.
+
+This is useful for resilience testing and development against partially-available services:
+the mock provides a reliable baseline while the upstream is flaky or under development.
+
+Configuration via `HttpForwardWithFallback`:
+- `httpForward` -- the upstream target (host, port, scheme)
+- `fallbackResponse` -- the mock response to return when fallback triggers
+- `fallbackOnStatusCodes` -- list of status codes that trigger fallback (default: 500-599)
+- `fallbackOnTimeout` -- whether to fall back on connection errors/timeouts (default: true)
+
+> **An absent `fallbackOnTimeout` is not the same as `false`.**
+> `HttpForwardWithFallbackActionHandler` reads it as
+> `action.getFallbackOnTimeout() == null || action.getFallbackOnTimeout()`, so **absent means
+> `true`** — and no schema declares a `default`, so the handler is the only authority. A client
+> that omits the field to mean "off" gets fallback anyway. Anything generating or round-tripping
+> this action must emit the value explicitly rather than omitting it when false; the dashboard
+> code generator did the latter and produced snippets that contradicted the UI selection.
+> This is the same asymmetry as `closeConnection` on the streaming actions (see
+> [ai-protocol-mocking.md](ai-protocol-mocking.md)).
+
+### Forward Retry & Per-Upstream Circuit Breaker
+
+All matched FORWARD-class actions (`FORWARD`, `FORWARD_TEMPLATE`, `FORWARD_CLASS_CALLBACK`, `FORWARD_REPLACE`, `FORWARD_VALIDATE`, `FORWARD_WITH_FALLBACK`, `FORWARD_OBJECT_CALLBACK`) funnel through `HttpForwardAction.sendRequest(...)`, the single place that calls `NettyHttpClient`. Two **opt-in, default-off** resilience controls wrap that call so existing behaviour (forward exactly once, always attempt) is byte-for-byte unchanged unless configured.
+
+```mermaid
+flowchart TD
+    REQ([FORWARD-class action]) --> CB{"Circuit breaker open\nfor host:port?"}
+    CB -->|Yes enabled and open| FAST[503 fail fast]
+    CB -->|No or disabled| ATTEMPT[Attempt forward via NettyHttpClient]
+    ATTEMPT --> RES{"Transient failure?\nconn error / 502 / 503 / 504"}
+    RES -->|No| OK[Return response, record success]
+    RES -->|Yes, idempotent and retries left| BACKOFF[Linear back-off, retry]
+    BACKOFF --> ATTEMPT
+    RES -->|Yes, out of retries or non-idempotent| FAIL[Return failure, record failure]
+```
+
+- **Retry** (`ForwardRetryPolicy`, config `forwardProxyRetryCount` / `forwardProxyRetryBackoffMillis`): re-issues the upstream call up to *N* times when an attempt is a transient failure — a connection-level exception or an upstream **502/503/504**. Only **idempotent** methods (GET, HEAD, OPTIONS, PUT, DELETE, TRACE) are retried; POST/PATCH are never retried so a request is never executed twice. Retries are chained asynchronously off the response future (never blocking the event loop) with a linear back-off (`backoff × attemptNumber`). Default `forwardProxyRetryCount=0` = forward exactly once.
+- **Circuit breaker** (`ForwardCircuitBreaker`, config `forwardProxyCircuitBreakerEnabled` + threshold/window): a process-wide singleton keyed by upstream `host:port`. After `forwardProxyCircuitBreakerFailureThreshold` consecutive failures the breaker trips **open** and `sendRequest` fails fast with a 503 (no upstream attempt) for `forwardProxyCircuitBreakerWindowMillis`; then **half-open** admits a single trial request — a success closes it, a failure re-opens it. The retry policy and breaker compose: a request's final outcome (after any retries) feeds `recordSuccess`/`recordFailure`, or `recordNeutral` when it says nothing about the upstream's health (a configuration error, a header-limit refusal, or an upstream proxy that could not be reached): that leaves the state and the failure count as they were and only frees a half-open trial, so the next request probes the upstream. A target `forwardProxyBlockPrivateNetworks` refuses is turned away before the breaker is consulted, so it is not counted either and takes no trial. The open-upstream count is exported as the `mock_server_upstream_circuit_open` gauge (see [metrics.md](metrics.md)) and reset on `HttpState.reset()`. The upstream key can come from the request's `Host` header (or HTTP/2 `:authority`, whose value validation is deliberately off), so the breaker logs it through `StringFormatter.escapeControlCharactersForLog`, which writes CR, LF and other control characters as escapes so they cannot forge a log line.
+
+The unmatched speculative-proxy path (`HttpActionHandler`, which calls `NettyHttpClient` directly) is intentionally **not** wrapped by these controls; they apply to matched forward expectations. Self-loopback relay and the HTTP/2/HTTP/3 forward paths are unaffected (the breaker only keys on a resolvable host, and retry only engages for idempotent methods when explicitly configured).
+
+### Forward Upstream Protocol Selection (HTTP/1.1 vs HTTP/2)
+
+`HttpForwardAction.sendRequest(...)` chooses the protocol used for the **upstream** forward connection:
+
+- **Default (`forwardProxyHttp2Enabled=false`)** — the forwarded request's protocol is nulled, so `NettyHttpClient` uses HTTP/1.1 for every forward regardless of the inbound request's protocol. This is the historical behaviour and is byte-identical to before the property existed.
+- **Opt-in (`forwardProxyHttp2Enabled=true`)** — the **inbound request's protocol is preserved** on the forwarded request. An HTTP/2 inbound request is therefore forwarded to the upstream as HTTP/2; an inbound request with no protocol marker still forwards as HTTP/1.1.
+
+HTTP/2 upstream forwarding relies on the existing HTTP/2 client stack: `NettyHttpClient` only flows HTTP/2 over **TLS with ALPN** (via `HttpClientInitializer` / `HttpOrHttp2Initializer`). A non-secure HTTP/2 forward is automatically **downgraded to HTTP/1.1** by `NettyHttpClient`, so there is no h2c (cleartext / prior-knowledge) forward path. HTTP/2 forward connections **are pooled and reused** (`HttpForwardConnectionPool`, keyed by host/port/scheme/protocol so HTTP/1.1 and HTTP/2 channels never mix): after a stream completes its parent connection is returned to the pool and the next forward to the same upstream opens a fresh stream on it (`HttpClientHandler#tryReleaseHttp2ParentToPool`, gated by `NettyHttpClient.POOL_KEEP_PARENT`) instead of opening — and closing — a new TCP/TLS connection per request. This matters most for a client that negotiated HTTP/2 in an HTTPS CONNECT (MITM) tunnel: without it every forwarded request churned an upstream connection and could exhaust ephemeral ports under sustained load. The pool reuses one parent per in-flight request (a fresh stream each), so concurrency is bounded by the pool size rather than by cross-stream multiplexing. An HTTP/2 parent is only returned to the pool when the upstream answered on our own **client-initiated (odd) stream** — plain HTTP/2. Some servers (notably MockServer's own legacy connection-adapter HTTP/2 server) answer on a **server-initiated (even) stream**; the multiplex forward client tolerates that only for a fresh connection per request, so a response seen on an even stream leaves the parent unpooled (closed after the one response, the historical behaviour) rather than desynchronising a reused connection. A pooled connection can be closed by the upstream (idle timeout, GOAWAY, restart) after it is acquired; an idempotent request (GET, HEAD, PUT, DELETE, OPTIONS, TRACE) that fails on a **reused** connection before any response byte is retried once on a fresh connection, while a non-idempotent request fails as before so it is never sent twice. **Limitations:** streaming (SSE) forwards remain excluded from pooling on all protocols. An upstream's response headers and trailers are read up to `maxHeaderSize` on every protocol, and a larger response fails the forward with a `502` that says so: see [netty-pipeline.md → Upstream response headers](netty-pipeline.md#upstream-response-headers).
+
+### Host Header Auto-Adjustment
+
+When forwarding requests via `FORWARD_REPLACE` or `FORWARD_TEMPLATE` actions, MockServer can automatically adjust the `Host` header to match the target server. This is controlled by the `forwardAdjustHostHeader` configuration property (default: `true`).
+
+This prevents HTTP 421 "Misdirected Request" errors that occur when the target server validates the Host header against its own server name. The adjustment uses the `socketAddress` on the request to compute the correct Host value. If an explicit Host header is provided in the request override, it is always preserved.
+
+The `FORWARD` action type (`HttpForwardActionHandler`) has always adjusted the Host header to match the forward target; this behaviour is unchanged.
+
+### Error Action
+
+| Type | Handler | Description |
+|------|---------|-------------|
+| `ERROR` | `HttpErrorActionHandler` | Writes raw bytes and/or drops or resets (TCP RST, `resetConnection`) the connection, or resets the HTTP/2 stream (`streamError`). On HTTP/1.1, when the connection stays open, it fires `HttpExchangeEndedEvent` so the exchange tracker and transport timer end the exchange the raw bytes (or the missing response) stood in for. Before it writes raw bytes it fires `RawResponseBytesEvent` with their length, which lets a CONNECT/SOCKS relay hand them to its client as they are (see [netty-pipeline.md](netty-pipeline.md#raw-bytes-responses-through-a-tunnel)) |
+
+### LLM Response Action
+
+| Type | Handler | Description |
+|------|---------|-------------|
+| `LLM_RESPONSE` | `HttpLlmResponseActionHandler` | Encodes a provider-correct LLM response from a high-level `Completion` |
+
+`HttpLlmResponseActionHandler` routes to the appropriate `ProviderCodec` based on the `HttpLlmResponse.provider` field. For non-streaming completions, the codec produces an `HttpResponse` directly. For streaming completions, the codec produces a `List<SseEvent>` via `StreamingPhysicsExpander`, which is then handed to `HttpSseResponseActionHandler` for delivery.
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant ActionHandler as HttpLlmResponseActionHandler
+    participant Registry as ProviderCodecRegistry
+    participant Codec as ProviderCodec
+    participant Expander as StreamingPhysicsExpander
+    participant SSE as HttpSseResponseActionHandler
+
+    Client->>ActionHandler: HTTP POST (matched expectation)
+    ActionHandler->>Registry: lookup(provider)
+    Registry-->>ActionHandler: codec
+
+    alt Non-streaming
+        ActionHandler->>Codec: encode(completion, model)
+        Codec-->>ActionHandler: HttpResponse
+        ActionHandler-->>Client: HTTP response
+    else Streaming
+        ActionHandler->>Expander: expand(completion, physics)
+        Expander->>Codec: encodeStreaming(completion, model, physics)
+        Codec-->>Expander: List of SseEvent
+        Expander-->>ActionHandler: List of SseEvent with delays
+        ActionHandler->>SSE: stream events
+        SSE-->>Client: SSE event stream
+    end
+```
+
+See [LLM Mocking](llm-mocking.md) for the full architecture.
+
+### Sequential/Cycling Response Dispatch
+
+When an expectation is configured with `httpResponses` (a list of `HttpResponse` objects) instead of a single `httpResponse`, each match returns the next response in the list. The selection is controlled by `responseMode`:
+
+- **`SEQUENTIAL`** (default): Returns responses in order, cycling back to the first after the last. Uses `(matchCount - 1) % size` because `matchCount` is incremented in `consumeMatch()` before `getPrimaryAction()` is called.
+- **`RANDOM`**: Returns a random response from the list on each match (uniform probability).
+- **`WEIGHTED`**: Returns a response chosen probabilistically by relative weight. Weights are supplied via the index-aligned `responseWeights` list on the expectation (e.g. `[90, 10]` selects the first response ~90% of the time and the second ~10%). A missing or non-positive weight defaults to `1`; if the total effective weight is non-positive, selection falls back to uniform random. Implemented as cumulative-weight selection in `Expectation.selectWeightedResponse()`.
+- **`SWITCH`** (lightweight per-expectation hit-count branching): Serves the first response for the first `switchAfter` matches, then advances one index in `httpResponses` for every further block of `switchAfter` matches, clamping at the last response. The common two-response case serves the first response for `switchAfter` calls and the second for every call after — "respond differently after the Nth call" for a single expectation without a full scenario. The `switchAfter` integer is a serialized field (defaults to `1` when unset, i.e. advance on each call); it is ignored outside `SWITCH` mode. Implemented as `index = min((matchCount - 1) / switchAfter, size - 1)` in `Expectation.selectSwitchedResponse(...)`. For complex multi-endpoint flows a full scenario (`scenarioName`/`scenarioState`) remains the right tool; `SWITCH` is the minimal single-expectation option.
+
+The cycling/selection logic is in `Expectation.getPrimaryAction()` -> `selectFromResponses()`. The `matchCount` is tracked per-expectation via an `AtomicInteger` and is runtime-only state (`@JsonIgnore`). `responseWeights` and `switchAfter` are serialized fields that round-trip in expectation JSON; weights are ignored unless `responseMode` is `WEIGHTED`, and `switchAfter` is ignored unless `responseMode` is `SWITCH`.
+
+**Force a variant per request (`x-mockserver-response-index`):** an incoming request may carry the `x-mockserver-response-index` header (0-based; `Expectation.FORCE_RESPONSE_INDEX_HEADER`) to force which `httpResponses` entry it is served, overriding `responseMode` for that one request. Selection resolves via the `Expectation.getPrimaryAction(Integer)` overload: a valid in-bounds index (per `isForcedResponseServe`) returns that exact response with **peek semantics** — the request is still a real match (it consumes a `Times` unit and increments `matchCount`), but it does **not** advance the response-sequence rotation.
+
+The rotation position lives on its own counter, `rotationCount`, separate from `matchCount`. At **match time** (`consumeMatch(Integer)` / `consumeMatchLocally(Integer)`, called from `RequestMatchers` which has the request in hand), a NORMAL request advances `rotationCount` and snapshots it into a per-thread `lastRotationSnapshot`; a FORCED request increments only `matchCount` and snapshots the *un-advanced* `rotationCount`. `selectFromResponses()` derives both `SEQUENTIAL` and `SWITCH` positions from that thread-local snapshot. Because a forced request never touches `rotationCount`, the collision-free invariant (each normal match gets a distinct, monotonic position snapshotted at match time) holds unconditionally under concurrency — `AtomicInteger.incrementAndGet()` guarantees each caller sees a different value, so no two normal matches can receive the same sequence position. There is no resolution-time compensation read that could race normal traffic. No dedicated concurrency test currently pins this property; `MockServerMatcherSequentialResponsesTest` covers single-threaded behaviour only. Invalid, non-integer, or out-of-bounds values are ignored (normal selection applies) — never an error — and single-response expectations ignore the header.
+
+The control header is **not** stripped from the request object during dispatch (that object is shared with the `RECEIVED_REQUEST` log entry, which stores requests by reference, so mutating it would non-deterministically drop the header from recordings). Instead it is filtered out only when the outbound forward/proxy request is built, in `MockServerHttpRequestToFullHttpRequest.setHeader` (and, for WebSocket passthrough, in `WebSocketProxyRelayHandler.isSuppressedRelayHeader`) (alongside the hop-by-hop header filter). **Recorded traffic therefore deterministically retains the header, and forwarded/proxied upstream requests never carry it.** Matching is unaffected because the header is still present on the request throughout matching and action resolution.
+
+### Rate Limiting (`rateLimit` clause)
+
+An expectation may carry a declarative, protocol-agnostic `rateLimit` clause (a sibling of `chaos` — see [docs/code/domain-model.md](domain-model.md)). When a matched expectation is over-limit for the current window, MockServer returns a deterministic `errorStatus` (default `429`) response — carrying `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining` (`0`), and `X-RateLimit-Reset` (unix seconds) — **instead of** the normal response; within the limit the normal response is returned unchanged. An expectation without a `rateLimit` clause behaves and serializes byte-for-byte identically to before.
+
+`dispatchPrimaryAction()` reads `expectation.getRateLimit()` once per matched request and threads it into the single write path (`writeResponseActionResponse` for `RESPONSE` / `RESPONSE_TEMPLATE` / `RESPONSE_CLASS_CALLBACK`, and `writeForwardActionResponse` for the `FORWARD` family). The check `rateLimitResponseOrNull(rateLimit, expectationId)` calls `RateLimitRegistry.getInstance().tryAcquire(...)` — which **mutates** registry state — so it runs **exactly once** per matched request, in the write path only. The **streaming** response actions — `SSE_RESPONSE`, `GRPC_STREAM_RESPONSE`, and `WEBSOCKET_RESPONSE` — are also gated: the same `rateLimitResponseOrNull(rateLimit, expectationId)` check runs once per matched request at the top of each stream case, so an over-limit request receives the synthetic `429` (via `writeResponseActionResponse`) **instead of** opening the stream; within the limit the stream proceeds unchanged. Still deferred (these thread `null` and so are NOT gated by the general `rateLimit` clause): the matched-expectation `LLM_RESPONSE` (which has its own token-based TPM/TPD limiter — see [docs/code/llm-mocking.md](llm-mocking.md)), the object-callback response action, and the anonymous/unmatched proxy-pass paths.
+
+Precedence inside the write path (highest first): connection-drop chaos → **`rateLimit` (429)** → chaos `quota` (`HttpQuotaRegistry`) → probabilistic chaos `error` → real-response chaos (truncate/malformed/slow). The rate-limit gate is checked before the chaos quota and before the probabilistic chaos error, so a configured `rateLimit` deterministically wins.
+
+The counter is keyed by `rateLimit.name` (or, when `name` is omitted, the expectation id), so expectations sharing a `name` share one counter. Two algorithms are supported: `FIXED_WINDOW` (`limit` per `windowMillis`) and `TOKEN_BUCKET` (`burst` capacity refilling at `refillPerSecond`). State lives in the node-local `RateLimitRegistry` (`org.mockserver.ratelimit`), is cleared on `HttpState.reset()`, and is bounded by `rateLimitMaxNamedQuotas` (fail-open on a new key once the cap is reached). v1 is node-local; see [docs/code/clustered-state.md](clustered-state.md) for the clustering trade-off.
+
+### RecoverAfter Selection (Fail-Then-Succeed)
+
+When a matched RESPONSE action carries a `recoverAfter` clause (`HttpResponse.getRecoverAfter()`, see [domain-model.md](domain-model.md#recoverafter-retrybackoff-recovery)), the dispatcher chooses between the failure response and the configured success response *before* the response is materialised. The helper is `HttpActionHandler.selectRecoveryResponse(action, expectation, request, capturedMatchCount)`:
+
+- It is applied in the `dispatchPrimaryAction` RESPONSE case (the selected response replaces `(HttpResponse) action` in the `getHttpResponseActionHandler().handle(...)` call) **and** in the early-action RESPONSE path of `processEarlyAction` (respond-before-body), so both dispatch routes behave identically.
+- Selection is a pure function of the 1-based attempt `n`: by default `n = capturedMatchCount` (already in scope, captured before scheduling to avoid races). When `recoverAfter.idempotencyHeader` is set and present on the request, `n = RecoveryAttemptRegistry.getInstance().nextAttempt(expectation.getId(), headerValue)`; when the header is configured but absent, it falls back to `capturedMatchCount`. The keyed registry is incremented **only** on the keyed path, so the default path adds no new state or overhead.
+- When `n <= failTimes` the failure response is served — the configured `failResponse`, or a default `503 Service Unavailable` when none is configured. Otherwise the configured response is returned unchanged (identity). A `null`/`<= 0` `failTimes`, or a `null` `recoverAfter`, returns the action unchanged, so a response without the clause is byte-for-byte unaffected.
+- Selection is independent of `Times` (a failing attempt does not consume an extra `Times` use) and runs before the chaos/breakpoint pipeline inside `dispatchMockResponseWithBreakpoint` / `writeResponseActionResponse`, so it composes with chaos faults applied to whichever response was selected.
+
+**Scope — the `RESPONSE` action only.** `recoverAfter` is a field on `HttpResponse`, and `selectRecoveryResponse` is interposed only in the `case RESPONSE` arm (both the early-response branch and the main dispatch path). `RESPONSE_TEMPLATE` (`HttpTemplate`) and `RESPONSE_CLASS_CALLBACK` (`HttpClassCallback`) carry no `HttpResponse`, so they cannot express the clause and are never passed through `selectRecoveryResponse`. It is likewise **not expressible on the `FORWARD` family**: those actions carry no `HttpResponse`, and the six `dispatchForwardWithBreakpoint(...)` call sites never consult `selectRecoveryResponse`. "Fail N forward attempts then forward for real" is deliberately deferred (it overlaps the forward-path `HttpChaosProfile` fault surface and would be an M–L cross-cutting change across the forward action models) — see the decision record at [docs/code/decisions/recover-after-is-response-only.md](decisions/recover-after-is-response-only.md).
+
+`RecoveryAttemptRegistry` is a node-local singleton keyed `expectationId + NUL + keyValue` (a NUL separator avoids collisions because the client-settable expectation id can contain a space). It is a **bounded** registry — a synchronized access-ordered `LinkedHashMap<String, AtomicInteger>` that evicts the least-recently-used key once 10,000 keys are held (mirroring `DnsIntentRegistry`), so client-supplied idempotency-key values (typically fresh UUIDs) cannot exhaust the heap; an evicted key restarts its failure window at attempt 1, matching `reset()` semantics. It is cleared in `HttpState.reset()` alongside the other action-state registries.
+
+### Before & After Actions
+
+An expectation can carry two optional ordered lists of side-effect actions, both using the same `AfterAction` type (exactly one of `httpRequest`, `httpRequestTemplate`, `httpClassCallback`, or `httpObjectCallback`, plus an optional `Delay`):
+
+- **`afterActions`** — executed *after* the primary response is sent. Dispatched fire-and-forget via `HttpActionHandler.dispatchSideAction(...)` from `expectationPostProcessor` (which also runs `HttpState.postProcess`). Responses are discarded and failures are only logged, so they never alter or delay the client response.
+- **`beforeActions`** — executed *before* the primary response and able to gate it. When an expectation has `beforeActions`, `processAction` wraps `runBeforeActions(...)` plus `dispatchPrimaryAction(...)` in `scheduler.submit(runnable, synchronous)` so any blocking wait runs off the event loop (async) or inline (synchronous), mirroring forward-action threading.
+
+`runBeforeActions` iterates the list applying three optional per-action controls that are meaningful only here (after-actions ignore them):
+
+- `blocking` (default `true` when null) — whether the response waits for the action.
+- `timeout` (a `Delay`; falls back to `configuration.maxSocketTimeoutInMillis()`) — max wait for a blocking action.
+- `failurePolicy` (`FAIL_FAST` or `BEST_EFFORT`, default `BEST_EFFORT`) — outcome when a blocking action fails or times out.
+
+Only webhook (`httpRequest` / `httpRequestTemplate`) before-actions can actually block: they are sent via the synchronous `httpClient.sendRequest(req, timeoutMillis, MILLISECONDS)` (throws on error/timeout). On failure, `FAIL_FAST` writes a `502` (`badGatewayResponse().withBody("before-action failed: ...")`) and `runBeforeActions` returns `false` so the primary action is skipped; `BEST_EFFORT` logs and continues. Non-blocking before-actions and callback before-actions are dispatched fire-and-forget via `dispatchSideAction` (a WARN is logged if `blocking=true` is set on a callback). When `runBeforeActions` returns `false`, `expectationPostProcessor.run()` is still invoked (it is idempotent via `compareAndSet`) so matcher state — `responseInProgress`, `times` exhaustion — is cleaned up and after-actions still fire after the `502`. Webhook fields support `{$request.*}` runtime expressions, resolved against the triggering request via `OpenApiRuntimeExpressionResolver`. An `httpRequestTemplate` webhook is instead rendered whole by `renderWebhookTemplate`, reusing `HttpForwardTemplateActionHandler`'s engines (so the same class-access restrictions and time limits) and `TemplateFailureException.render`; runtime expressions are not applied to its output. Rendering happens where the plain webhook is resolved — inside the `sheddable` scheduler task for fire-and-forget actions, inside the `scheduler.submit` wrapper for blocking before-actions — so it never runs on the event loop, and the rendered request goes through the same `refusedWebhook` SSRF check. A render failure is logged and nothing is sent; for a blocking before-action it is a failure under `failurePolicy`.
+
+#### Unified Ordered Steps
+
+When an expectation has `steps` (a `List<ExpectationStep>`), the dispatch pipeline is:
+
+1. **Pre-responder steps** — extracted by `Expectation.getPreResponderSteps()`, dispatched by `HttpActionHandler.runStepsPreResponder()`. Each step follows the same blocking/timeout/failurePolicy semantics as before-actions. Webhook steps can block; callback and forward side-effect steps are fire-and-forget.
+2. **Responder step** — the single step with `responder = true`. Its action is resolved via `Expectation.resolveStepAction()` and dispatched through the existing `dispatchPrimaryAction()` path (the normal action-type switch).
+3. **Post-responder steps** — extracted by `Expectation.getPostResponderSteps()`, dispatched by `HttpActionHandler.dispatchPostResponderSteps()` as fire-and-forget side-effects via `dispatchStepSideEffect()`.
+
+Steps and `beforeActions`/`afterActions` are independent: when `steps` is present it determines the pre/post pipeline ordering. Any existing `afterActions` still fire after the steps pipeline completes (from `expectationPostProcessor`). Validation is enforced at upsert time in `HttpState.add()` via `Expectation.validateSteps()`.
+
+### Template Engines
+
+Three template engines are supported for `RESPONSE_TEMPLATE` and `FORWARD_TEMPLATE`:
+
+| Engine | Class | Template Variable |
+|--------|-------|-------------------|
+| Velocity | `VelocityTemplateEngine` | `$request` |
+| Mustache | `MustacheTemplateEngine` | `request` (with `#jsonPath` and `#xPath` lambdas) |
+| JavaScript | `JavaScriptTemplateEngine` | `request` (GraalJS / GraalVM Polyglot — see note below) |
+
+> **JavaScript requires the optional GraalJS engine.** Velocity and Mustache are always available, but the GraalVM Polyglot (`org.graalvm.polyglot:polyglot` + `js`) dependency is `<optional>true</optional>` and is **not** bundled in the standard netty jar-with-dependencies or Docker image (`POLYGLOT_AVAILABLE=false` there). If a `JAVASCRIPT` template is actually used without GraalJS on the classpath, `JavaScriptTemplateEngine` **fails loudly** with a clear `RuntimeException` ("JavaScript response templates require the GraalJS engine, which is not on the classpath...") instead of silently degrading. Add the dependency, or run the `graaljs` Docker image variant, to enable it.
+
+All engines receive built-in dynamic variables from `TemplateFunctions.BUILT_IN_FUNCTIONS` (`now`, `now_epoch`, `now_iso_8601`, `uuid`, `rand_int`, `rand_bytes`, etc.) and five helper objects from `TemplateFunctions.BUILT_IN_HELPERS`:
+
+| Helper | Variable | Description |
+|--------|----------|-------------|
+| `JwtTemplateHelper` | `jwt` | Generate signed JWTs (`jwt.generate()`, `jwt.generate(claims)`) and JWKS (`jwt.jwks()`) for OAuth2/OIDC testing |
+| `StringTemplateHelper` | `strings` | String manipulation: `trim`, `capitalize`, `uppercase`, `lowercase`, `urlEncode`, `urlDecode`, `base64Encode`, `base64Decode`, `substringBefore`, `substringAfter`, `length`, `contains`, `replace` |
+| `JsonTemplateHelper` | `jsonTransform` | JSON manipulation: `merge`, `sort`, `arrayAdd`, `remove`, `prettyPrint`, `field`, `size` |
+| `DateTemplateHelper` | `dates` | Now-based (UTC, return text, unchanged): `format(pattern)`, `plusSeconds/Minutes/Hours/Days`, `minusSeconds/Minutes/Hours/Days`, `epochSeconds`, `epochMillis`, `epochSecondsPlus/Minus`, `rfc1123()`. Any-date (return an immutable `TemplateDate` for chaining): `now(zone?)`, `parse(date, pattern?, zone?)`, `format(date, pattern, zone?)`, `offset`, `truncate`, `withZone`, `rfc1123(date)`, `epochSeconds/Millis(date)` |
+| `MathTemplateHelper` | `calc` | Math operations: `randomInt(min,max)`, `randomDouble()`, `abs`, `min`, `max`, `round(value,scale)`, `format(value,pattern)`, `ceil`, `floor` |
+
+Helper objects are registered as template context variables, so methods are called directly (e.g., Velocity: `$strings.uppercase($!request.method)`, JavaScript: `dates.plusHours(1)`, Mustache: `{{ jwt }}`).
+
+**Date helper.** Every "now" reads `TimeService.now()`, so the controllable clock (`PUT /mockserver/clock`) and test time pinning apply. Invalid input throws `IllegalArgumentException` naming the helper (`dates.parse: cannot read ...`), which each engine wraps in `TemplateEvaluationException`. Mustache cannot pass arguments, so `MustacheTemplateEngine` binds `dates` to `MustacheDateTemplateHelper` (a subclass, built once per JVM) whose `render` section lambda takes `date|pattern=|zone=|offset=|truncate=|format=`; the no-argument methods (`{{ dates.rfc1123 }}`, `{{ dates.now.startOfDay }}`) resolve as properties. Pattern parsing is `ResolverStyle.STRICT` (unquoted `y` is read as `u` so era-less patterns work), so an impossible date fails, and a parsed time field that does not resolve (`hh` without `a`) fails instead of being dropped; empty input fails rather than meaning now. The `render` lambda compares the `|` count of the rendered body with the section's template text (`Fragment.decompile()`), so a request value cannot add options. Data-plane cost: nothing is built at registration or per render; a formatter, zone or parse happens only when a template calls the helper. Patterns and zones can come from request data, so a pattern over 1,024 characters or a zone over 64 is refused, and `TemplateDate` caches compiled formatters, strict parsers and `ZoneId`s (static `ConcurrentHashMap`s) only for keys of at most 128 characters, zones by their trimmed name, at most 256 entries each; a full cache is emptied before the next insert, so memory stays bounded (256 × 128-character keys per cache) and lock-free reads are unchanged.
+
+**WireMock-parity helpers and template parameters.** `TemplateFunctions.ON_DEMAND_HELPERS` holds `lists` (`ListTemplateHelper`: `pickRandom`, `array`, `arrayJoin`, `range`) and `hostname` (`HOSTNAME` from the environment when set, otherwise `InetAddress.getLocalHost()` run once on a daemon thread started when `TemplateFunctions` loads; reads are a volatile read that falls back to `localhost`, so no render, including a forward-response template on a Netty event loop, ever waits on DNS). Velocity and Mustache add them to their shared, construct-time binding maps, so a render pays nothing for them. `PolyglotRunner` binds every `BUILT_IN_*` entry on every JavaScript render, so it instead records per parsed script (in the `SOURCE_CACHE` entry) which on-demand helpers the template text names, and binds only those. `pickRandom` uses a `Random` seeded from `templateFakerSeed` when it is set (`TemplateFunctions.resolveLists`), otherwise `ThreadLocalRandom`. `range` returns a lazy `AbstractList` and every list is capped at `ListTemplateHelper.MAX_SIZE` (10,000) values. Mustache binds `lists` and `xpath` to subclasses (`MustacheListTemplateHelper`, `MustacheXPathTemplateHelper`) that add section lambdas (`pickRandom`, `arrayJoin`, `formatXml`, values separated by `|`) and a key-parsing map for `{{#lists.range.1.5}}`. `xpath.formatXml` parses with `StringToXmlDocumentParser` (DOCTYPE refused), strips whitespace-only text between elements, and serialises with a hardened identity `Transformer`; it refuses XML deeper than 256 elements and output over `max(64 KiB, 4 × input)`. `faker` is a `TemplateFaker` (a Datafaker `Faker` subclass) whose `locale(tag)` reduces the tag to language and region by string parsing (no `Locale` is built from it) and matches it against `SUPPORTED_LOCALES`, the fixed list of locales Datafaker ships a `.yml` for, filtered once against the classpath; an unsupported region falls back to the language and an unsupported language to the root (English) faker with a WARN. Datafaker interns every `Locale` it sees in static maps that never shrink (`SingletonLocale`, `FakerContext`, `FakeValues`), so only `SUPPORTED_LOCALES` entries ever reach it, and the per-root cache is keyed by them. Seeded fakers seed each locale faker with the same seed. `lists.arrayJoin` refuses output over `max(64 KiB, 4 × the values' length)`, and every list argument is size-checked before it is copied. `HttpTemplate.parameters` is a deep read-only copy (arrays become lists); the action handlers pass it through `TemplateEngine.executeTemplate(template, parameters, request, response, dtoClass)`, and an engine binds `parameters` only when it is non-empty (JavaScript gets a plain object via `JSON.parse`). `systemValue` (`SystemValueTemplateHelper`, WireMock's `systemValue`) is also an on-demand helper: `ON_DEMAND_HELPERS` holds one that reads nothing, and every engine replaces it with one built from its configuration's startup-only `templateSystemValueAllowList` (Velocity and Mustache in their shared bindings, JavaScript through `PolyglotRunner`'s per-engine `onDemandOverrides`, which also carries the seeded `lists`). `env(name)` and `property(name)` return the value only for a name on the list (exact, or a prefix ending in `*`) that is not reserved (`mockserver.*`, `MOCKSERVER_*`, the `javax.net.ssl` store passwords), and `""` for any other name, exactly as for an unset one; Mustache takes the name as a section body (`{{#systemValue.env}}NAME{{/systemValue.env}}`). Refused names are logged once per logger, not per render; `HttpState` logs what templates can read at every start.
+
+#### Template dry run and error positions
+
+Each engine wraps a failure in `TemplateEvaluationException`, whose message keeps the `Exception: ... transforming template: ... for request: ...` form and which carries the template `line`, `column` and a `hint` when known. Velocity and Mustache already state the position in their own message (`[line 3, column 7]`, `@ line 4`), so it is only attached to the exception; GraalJS reports positions in the wrapped script (`function handle(request) {` plus two lines), so `JavaScriptTemplateEngine` maps them back via `PolyglotRunner.templateLocation` and appends `at template line L, column C`, plus a hint for `ReferenceError ... is not defined`, a read of a field of `undefined`, and a syntax error found only after the template's last line. This appears in the serving path's failure event and in the `500` body that answers the client (see below).
+
+`PUT /mockserver/template/test` (`HttpState` → `org.mockserver.templates.TemplateDryRun`) renders `{templateType, template, actionType?, request?}` with its own Velocity, Mustache and dry-run JavaScript engines (same `Configuration`, so the same sandbox, allow-lists, `javascriptTemplateExecutionTimeout` and `velocityTemplateExecutionTimeout`; `JavaScriptTemplateEngine.forDryRun` and `VelocityTemplateEngine.forDryRun` still apply a 5 s cap when their timeout is 0, and the JavaScript one keeps its scripts out of `PolyglotRunner`'s shared parsed-source cache). The engines log to a capturing logger, so nothing reaches the event log; the `TEMPLATE_GENERATED` / `TEMPLATE_GENERATION_FAILED` entries become the report's `renderedOutput` and `validationErrors`. Velocity attaches an `InvalidReferenceEventHandler` (dry run only) to report unresolved references with their position. Serving Mustache compiles with `defaultValue("")`, so a missing variable renders empty; after a successful dry-run render `MustacheTemplateEngine` renders again with a compiler that throws on a missing variable (`nullValue("")`, so a variable that resolves to null still renders empty), binds each name found to empty text and repeats, up to 20 passes, reporting each name with the line of its first use. Serving never runs those passes. `ScenarioTemplateHelper.withoutStateChanges` turns `scenario.set` into a warning. Evaluation runs on a dedicated executor of at most two daemon threads (`SynchronousQueue`, so a third call gets a 429), never on the event loop; the response is written asynchronously, or joined in a servlet container, after at most the engine's time limit (Velocity's for Velocity, the JavaScript one for JavaScript and Mustache) plus a 5 s grace. A Velocity template normally stops itself at its limit, which the report marks `timedOut`; the grace answer is only reached by one inside a long Java call, or a Mustache template, which cannot be stopped and keeps its thread. The route is under `/mockserver` only (no bare alias) and is a mutating operation for control-plane authorisation, because it runs caller-supplied code. The MCP `test_template` tool calls the same `TemplateDryRun` through `HttpState.testTemplate` and is a MUTATE tool for the same reason.
+
+#### Template time limits and failures
+
+A template that fails, or runs past its time limit, answers the client with a `500` by default (`templateFailureAsServerError=true` since 9.0.0), or with a `404` when `templateFailureAsServerError` is false. With the flag on, output that is not a valid response or request, and a failed response template of a forward with overrides, are template failures too. <!-- version-ref:keep -->
+
+| Concern | Behaviour |
+|---------|-----------|
+| JavaScript time limit | `javascriptTemplateExecutionTimeout` (default 5000ms): a watchdog closes the GraalJS context, which cancels the guest code wherever it is |
+| Velocity time limit | `velocityTemplateExecutionTimeout` (default 5000ms). A Velocity render cannot be interrupted, so the deadline is checked at the points where a template can repeat work: each `#foreach` iteration (`TimeLimitedForeach`), each macro call (the per-render context overrides `pushCurrentMacroName`, which Velocity calls for every macro invocation), each `#parse` and `#evaluate` (`TimeLimitedParse`, `TimeLimitedEvaluate`), and each render of a `#define` block (`TimeLimitedDefine` overrides `Block.render(context, writer)`, which every `$block` reference goes through). Directives inside an interpolated string literal or an `#evaluate`d string are parsed by the same engine, so they are checked too. `RenderDeadline` counts these checks and reads the clock once every 64 of them; once the deadline has passed the next clock read throws `VelocityTemplateTimeoutException`. Loop count stays unbounded (`directive.foreach.max_loops=-1`), because a per-loop count limit cannot bound nested loops. **Not stopped:** a single long Java call made by the template runs to completion before the next check, such as a backtracking regular expression in `$s.matches(...)` or a method that walks a huge range (`$r.contains(-1)` on `[1..2147483647]` took about 3 s against a 500 ms limit). The limit is on time, not memory: a template that builds a huge value (`$l.addAll([1..2147483647])`, or doubling a string with repeated `#set`) can exhaust the heap |
+| Mustache | No time limit: Mustache has no loop construct of its own, and its sections iterate over finite data |
+| Failure answer | `HttpResponseTemplateActionHandler` and `HttpForwardTemplateActionHandler` wrap any engine failure in `TemplateFailureException`. `HttpActionHandler.handleAnyException` logs the engine's own failure (the `Exception: ... transforming template` entry, or the timeout message) exactly as before, then writes a `500` with `x-mockserver-template-error: true` and a `text/plain` body naming the engine and its error message, then `at template line L, column C` and `hint: ...` lines when the engine's `TemplateEvaluationException` carries them (capped at 8192 characters, without the template text and request the log entry carries), or a `404` when `templateFailureAsServerError` is false |
+| Output that is not valid | The engines log a `TEMPLATE_GENERATION_FAILED` entry and return null. With `templateFailureAsServerError` (the default), the handlers render through `TemplateFailureException.render`, which wraps the render in `HttpTemplateOutputDeserializer.reportingInvalidOutput`: a thread-local listener that receives the schema validation errors, or why the output could not be read, so a null result becomes a `TemplateFailureException` whose `500` body is `<ENGINE> <role> template rendered output that is not a valid <response or request>: <validation errors>` (capped at 8192 characters; the errors can quote part of the template's output). Every engine deserialises on the calling thread, so the listener sees its own render. When the flag is false the null answers `404` (response template), `502` (forward template) or leaves the upstream response unchanged (a forward's `responseTemplate`) |
+| Forward response template | `HttpOverrideForwardedRequestActionHandler` renders a `responseTemplate` in the upstream response callback, so its failure reaches `handleExceptionDuringForwardingRequest` inside the forward's future, not `handleAnyException`. With `templateFailureAsServerError` (the default) the render is wrapped as above, and `handleExceptionDuringForwardingRequest` finds the `TemplateFailureException` in the cause chain, logs the engine's failure at `ERROR` and answers the `500`; when it is false the render is unwrapped and a failure is a `502` like any forward failure |
+
+The deadline lives in a `ThreadLocal` set around `Template.merge` / `VelocityEngine.evaluate` and restored afterwards, because the directive instances belong to the cached, shared template AST and cannot hold per-render state. Velocity rethrows runtime exceptions from directives, macros and `#evaluate` unwrapped, but wraps one thrown inside a method call (a `#define` block rendered through `$block.toString()`) in a `MethodInvocationException`, so the engine looks for `VelocityTemplateTimeoutException` in the cause chain; either way the timeout is logged once at `WARN`, like the JavaScript timeout, not as a transform failure. Until 9.0.0 the flag defaulted to false, because a `404` that turns into a `500` breaks clients and tests that expect the `404`; 9.0.0, a major release, made the `500` the default, and `templateFailureAsServerError=false` restores the earlier answers (`404`, `502`, the upstream response). <!-- version-ref:keep -->
+
+#### Templates loaded from a file
+
+The template text for `RESPONSE_TEMPLATE` and `FORWARD_TEMPLATE` can be stored in an external file instead of being embedded inline in the expectation. Set `templateFile` (a classpath-or-filesystem path resolved by `FileReader.readFileFromClassPathOrPath`) on the `httpResponseTemplate` / `httpForwardTemplate`. `HttpTemplate.getTemplateContent()` returns the inline `template` when present, otherwise reads `templateFile`; the action handlers and `HttpOverrideForwardedRequestActionHandler` all call `getTemplateContent()`. This keeps the full template machinery (rendering an `HttpResponseDTO`/`HttpRequestDTO`) while letting large templates live outside the expectation JSON.
+
+#### Templated response body files (`FileBody` + `templateType`)
+
+A response body that is a `FileBody` is **materialised** — the referenced file is read and its contents become the body — so the file *contents*, not the file *path* string, reach the wire. A `templateType` of `VELOCITY` or `MUSTACHE` renders the file through `TemplateEngine.renderTemplate(...)` (raw text render — no `HttpResponseDTO` deserialization) against the request, preserving the declared content type; with no `templateType` (or an unsupported one such as `JAVASCRIPT`) the file is served verbatim — a text content type yields the decoded string, a binary or absent content type yields the raw bytes intact so images/PDFs/archives are not charset-corrupted. This differs from `RESPONSE_TEMPLATE`: the file is just the **body** payload, while the surrounding status code, headers, etc. come from the response. `JAVASCRIPT` is intentionally **not** supported for body-file templating (JS templates return structured objects, not text) — use `RESPONSE_TEMPLATE` with a JavaScript template for that.
+
+The materialisation logic lives in a single shared component, `FileBodyMaterialiser` (`mock/action/http/`, constructed with the `Configuration` + `MockServerLogger`, caching the Velocity/Mustache engines). It is invoked from the two response-write funnels in `HttpActionHandler` — `writeResponseActionResponse` (the static `RESPONSE`, object-callback, class-callback, response-template and SSE paths) and `writeForwardActionResponse` (the forward `responseOverride`) — so a `FileBody` produced by **any** of those five producers, and the shared WAR/servlet path, serves the file contents. It is idempotent for the static path: `HttpResponseActionHandler.handle` has already replaced the `FileBody` with a `String`/`Binary` body, so by the funnel it is no longer a `FileBody` and is not read twice. The request is only available on the primary/secondary `RESPONSE` dispatch paths, so `HttpResponseActionHandler`'s no-request `handle(httpResponse)` overload leaves a *templated* `FileBody` untouched (it must not template without a request); the funnels always pass the request. A missing/unreadable file throws a typed `FileBodyException` (`org.mockserver.file`) that the funnels turn into a clean, logged `500` whose body does not leak the path.
+
+**Which thread reads the file.** A `RESPONSE` action (main and `respondBeforeBody` paths) whose selected response body is a `FileBody` is dispatched through `Scheduler.submitFileBodyRead` instead of `Scheduler.schedule`, so the whole dispatch — the request breakpoint, `HttpResponseActionHandler.handle` (the read and any template render) and `writeResponseActionResponse` — runs on the scheduler's bounded file read pool, the 4 threads `staticFilesDirectory` uses, created on first use and shut down in `Scheduler.shutdown`. Slow storage therefore stalls only those threads, not every connection on an event loop. HTTP/3 calls `processAction` asynchronously, as HTTP/1.1 and HTTP/2 do, so it hops too; only a synchronous caller with no channel (the WAR servlets) reads inline, as before. The test is one `instanceof` on the selected response, so a response without a FILE body runs the old `scheduler.schedule` call with the same lambda and no extra allocation. There is no file cache for `FileBody` (each response reads the file, unlike `templateFile`'s `TemplateFileContentCache`, which still stats on every hit), so every FILE body hops. Over 1,000 queued file reads the request gets `503` with `Retry-After: 1`, counted as `file_bodies`. The hop changes no response bytes, status or headers, and errors (missing file, path guard refusal) answer the same logged `500`. A FILE response joins the asynchronous responses (delayed, templated, forwarded): on one HTTP/1.1 connection a pipelined request after it may be answered first, as it already could after those; HTTP/2 responses stay on their own stream. A FILE body returned by a callback, a response template or a forward `responseOverride` is read where that action already runs (the local-callback, template or scheduler pool), except an object callback answered over a WebSocket, which is read on that WebSocket connection's event loop. `HttpActionHandlerFileBodyReadTest`, `FileBodyReadPoolIntegrationTest` (HTTP/1.1 keep-alive bytes equal to inline STRING/BINARY bodies, concurrent HTTP/2 streams over the flow-control window, no pool without FILE bodies) and `Http3FileBodyIntegrationTest` pin this.
+
+**Templated file path (`templatedFilePath`).** When a `FileBody` has `templatedFilePath: true`, a supported `templateType` and a request, `FileBodyMaterialiser` renders `filePath` with the same engine and reads the result through `TemplatedFilePathGuard`. Literal paths stay unrestricted (they come from the expectation author); rendered paths carry request data, so they are confined:
+
+- **Opt-in and cost.** A body without the flag pays one `Boolean` check. With the flag, a character scan (`firstTemplateMarker`: `{{` for Mustache, `$`/`#` for Velocity) finds no marker and the literal path is read without touching an engine. Only a flagged path with a marker does per-request work: one render through the engine's parsed-template cache, regex-free character scans, one classpath lookup and two `toRealPath()` resolutions. FILE bodies are not cached (`TemplateFileContentCache` serves only `HttpTemplate.templateFile`).
+- **Base directory.** The literal prefix before the first marker, cut back to its last separator. It must contain a segment other than empty, `.` or a drive letter, so a template cannot open the whole working directory, classpath root or filesystem.
+- **Request-influenced suffix.** It must be non-empty, with no `.`/`..`/empty segment, and no `\`, `:`, `%`, control or line-separator character.
+- **Read and containment.** `readConfined` looks on the classpath first, like `FileReader`:
+  - a `file:` resource or a filesystem file is resolved with `toRealPath()`, must lie under the real path of its base (for a classpath directory, the resource path minus the request segments), and is opened by that real path with `NOFOLLOW_LINKS`, so the file read is the file checked;
+  - a `jar:` entry is read only when its entry name is exactly the checked path; archive entries cannot be symlinks;
+  - any other protocol (`vfs:`, `war:`, `bundleresource:` and so on) is refused, because containment cannot be verified;
+  - a `file:` URL that is not percent-encoded is converted with the multi-argument `URI` constructor, and a URL that still cannot be converted is refused.
+  An intermediate-directory swap inside the base between check and read remains possible, because Java has no `openat`; it needs write access to the base.
+- **Failures.** A refusal throws the same `FileBodyException` as a missing file, so the caller answers the same logged `500`. The logged path has control and line-separator characters escaped. Request matching never templates the path, because `BodyMatcherBuilder` has no request to render against.
+
+The same `FileBodyMaterialiser` also backs **request** matching: `BodyMatcherBuilder`'s `FILE` case reads the file verbatim and matches the request body against its exact contents (an `ExactStringMatcher` for a text content type, a `BinaryMatcher` otherwise) — previously there was no `FILE` case, so a `FileBody` request matcher was silently ignored.
+
+#### Templated streaming payloads (SSE / WebSocket / gRPC stream + `templateType`)
+
+Streaming responses can render each pushed payload from a response template instead of a fixed string. Set an optional `templateType` (`VELOCITY`, `MUSTACHE` or `JAVASCRIPT`) on `httpSseResponse` / `httpWebSocketResponse` (action-level, applies to every event/message), or per-message on a gRPC `grpcStreamResponse` message. The shared `StreamTemplateRenderer` (`mock/action/http/`) renders each payload against the **triggering request** using exactly the same engines and request/template context (`request.*`, `jsonPath`, the built-in helpers, `faker`, `scenario`) as `HttpResponseTemplateActionHandler`, and caches the engines lazily per handler instance:
+
+- **SSE** — `HttpSseResponseActionHandler` renders each `SseEvent`'s `data` payload just before the event is written, producing a rendered copy so a reused expectation renders freshly per request (the stored event is never mutated).
+- **WebSocket** — `HttpWebSocketResponseActionHandler` renders each text `WebSocketMessage` before the frame is written (and before stream-frame breakpoint interception, so breakpoints observe the rendered bytes). Binary frames are never templated.
+- **gRPC server-stream** — `GrpcStreamResponseActionHandler` renders the message `json` against the request before protobuf encoding when the message carries a `templateType`.
+
+Text-based engines (Velocity/Mustache) render the payload directly via `renderTemplate(...)`. JavaScript uses `TemplateEngine.renderTemplateText(...)` (new): the JS engine executes the template's `handle(request)` function and coerces the return value to text (a returned string is used verbatim, any other value is `JSON.stringify`'d) — this is what makes JS usable for a text fragment, since the response-object `renderTemplate` path is unsupported for JS. When `templateType` is absent every payload is emitted byte-for-byte unchanged (opt-in, non-breaking). If a `JAVASCRIPT` template is requested without GraalJS on the classpath, rendering fails loudly with the same clear `RuntimeException` as the response-template path rather than degrading silently. (Reactive WebSocket responses — matcher-triggered `matchers` responses and GraphQL-subscription `next` payloads — are not yet templated; only the eager `messages` list is.)
+
+> **GraalJS per-request isolation is a hard invariant.** A fresh GraalJS `Context` is created per render (try-with-resources, closed on every path). An earlier attempt to cache the `Context` on a per-thread basis hung the core Surefire fork at its 1800 s timeout deterministically for several builds; the root cause was a concurrency stall on a shape that reused a per-thread `Context`. The current shape does not reuse `Context`s, which is why a shared process-wide `Engine` could be introduced safely. Any change that shares or reuses a `Context` between requests re-enters that failure mode and also breaks realm isolation (cross-request data leakage). Additionally, the GraalVM class filter is per-`Context`, not per-`Engine`; moving filtering onto the shared `Engine` would break a per-server security boundary tied to a published security advisory. A Velocity `ToolContext` is also created fresh per render because `$json`/`$xml` hold per-request parse state; sharing it is a data-leak defect, not an optimisation.
+
+### Generating a response body from an inline JSON Schema
+
+A static `RESPONSE` with **no explicit body** can set `generateFromSchema` to a plain (inline) JSON Schema. When `HttpResponseActionHandler.handle(...)` sees an unset body and a non-blank `generateFromSchema`, it delegates to `JsonSchemaResponseSynthesizer`, which wraps the inline schema in a minimal OpenAPI document, parses it with the same `OpenAPIParser` used for full specs (so typed swagger `Schema` subclasses, `$ref`, `allOf` and OpenAPI 3.1 type arrays are produced), and runs the existing `ExampleBuilder`/`SampleDataGenerator` engine — no example-generation logic is reimplemented. The generated body is set as a JSON `StringBody`. An explicit body always wins (the schema path only fills an unset body), and this synthesis does not depend on the request, so it also runs on the no-request `handle(httpResponse)` overload (unlike GraphQL synthesis below, which requires the request query). A schema that cannot be parsed (`JsonSchemaResponseSynthesisException`) is logged at WARN and leaves the body unset rather than failing the request.
+
+## WebSocket Object Callbacks
+
+For `RESPONSE_OBJECT_CALLBACK` and `FORWARD_OBJECT_CALLBACK`, the callback runs on the client side:
+
+```mermaid
+sequenceDiagram
+    participant T as Test Code
+    participant C as MockServerClient
+    participant WS as WebSocket Client
+    participant S as MockServer
+    participant REG as WebSocketClientRegistry
+
+    T->>C: when(request).respond(callback)
+    C->>C: Generate clientId
+    C->>C: Store callback in LocalCallbackRegistry
+    C->>WS: Connect to /_mockserver_callback_websocket
+    WS->>S: WebSocket upgrade
+    S->>REG: registerClient(clientId, channel)
+    C->>S: PUT /mockserver/expectation (HttpObjectCallback with clientId)
+
+    Note over S: Later, when request arrives...
+    S->>REG: sendClientMessage(clientId, request)
+    REG->>WS: TextWebSocketFrame(serialized request)
+    WS->>C: receivedTextWebSocketFrame
+    C->>C: Look up callback by clientId
+    C->>C: Invoke callback.handle(request)
+    C->>WS: TextWebSocketFrame(serialized response)
+    WS->>S: receivedTextWebSocketFrame
+    S->>REG: Dispatch to WebSocketResponseCallback
+    S->>S: Return response to original request
+```
+
+## Global Response Delay
+
+The `globalResponseDelayMillis` configuration property adds a fixed delay to all matched expectation responses. The delay is **additive** — it combines with any per-action delay. Implementation:
+
+- `HttpActionHandler.combineWithGlobalDelay(Delay actionDelay)` returns a `Delay[]` passed as varargs to `Scheduler.schedule()`
+- `Scheduler.sampleCombinedDelayMillis()` sums all delay samples
+- Only applies to the primary response path (not after-actions or secondary actions)
+- Only applies when an expectation matches (unmatched/proxied requests are not delayed)
+
+## Overload Bounds on Delayed and Templated Actions
+
+**A matched request that must wait — for a delay, or for a template thread — is admitted only while fewer
+than a configured number are already waiting; over the limit it is answered at once with
+`503 Service Unavailable` (`Retry-After: 1`).** Each waiting task holds its request, response writer and
+channel, so before these bounds a sustained arrival rate against a delayed or templated expectation grew
+the scheduler and template queues, and the heap, without limit. Within the limits nothing changes: delays,
+ordering and threads are exactly as before.
+
+```mermaid
+flowchart TD
+    D["HttpActionHandler dispatch\n(wrapped: rejectable / delayOptional / sheddable)"] --> DL{"delay > 0?"}
+    DL -->|No| RUN["run inline / hop to pool"]
+    DL -->|Yes| PD{"its budget\n< maxPendingDelayedResponses?"}
+    PD -->|No| FB["fallback on the dispatching thread:\n503 / write without latency / drop\n+ counter + rate-limited WARN"]
+    PD -->|Yes| TIMER["ScheduledThreadPoolExecutor timer"]
+    TIMER --> TPL{"template action?"}
+    RUN --> TPL
+    TPL -->|No| WRITE["run the action"]
+    TPL -->|Yes| TQ{"queued renders\n< maxQueuedTemplateActions?"}
+    TQ -->|No| FB
+    TQ -->|Yes| POOL["template-action pool"]
+```
+
+| Wrapper | Used for | Budget | Over the limit | Metric `reason` |
+|---------|----------|--------|----------------|-----------------|
+| `Scheduler.rejectable(task, onRejected)` | Every request dispatch that can carry a delay: the delayed write in `writeResponseActionResponse` (all mock-response actions), each action type's action/global delay (callbacks, the forward family, SSE, LLM, WebSocket, gRPC streaming, `error`), templates | Delayed responses (`maxPendingDelayedResponses`) | `503`, expectation post-processed | `delayed_responses` |
+| same, template stage | Response/forward template renders waiting for a thread | Template queue (`maxQueuedTemplateActions`) | `503` | `template_actions` |
+| `Scheduler.submitStaticFileRead(...)` | `staticFilesDirectory` reads waiting for one of the 4 file read threads | Fixed queue of 1,000 reads, shared with FILE response bodies | `503` with `Retry-After: 1` | `static_files` |
+| `Scheduler.submitFileBodyRead(...)` | `RESPONSE` actions whose body is a FILE body, waiting for one of the same 4 file read threads | The same queue of 1,000 reads | `503` with `Retry-After: 1`, expectation post-processed | `file_bodies` |
+| `ExtensionAdminRoutes` (via `Scheduler.refuseForOverload`) | Extension admin route calls in flight (see [extensions.md](extensions.md#admin-routes-h5)) | `extensionAdminMaxInFlight` slots, each held until its handler returns | `503` with `Retry-After: 1` | `extension_admin` |
+| `Scheduler.delayOptional(write)` | Chaos latency on an already-forwarded response | Delayed responses | The upstream response is written at once, without the latency | `delay_skipped` |
+| `Scheduler.sheddable(task)` | Delayed fire-and-forget side actions: after-actions and non-blocking before-actions, secondary actions, step side effects | Delayed side actions (its own budget, same limit) | Dropped | `side_actions` |
+| `Scheduler.scheduleReplySet(...)` | WebSocket bidi reply sets (one per matched inbound frame); per connection, reads also pause while more than 128 delayed sets are pending | WebSocket reply frames (its own budget, same limit), admitted or refused a whole set at a time | The WebSocket is closed with status `1013` (Try Again Later); no frame of the set is sent | `websocket_replies` |
+| `Scheduler.scheduleCancellable(...)` | Control-plane timed scenario transitions | One per scenario: a re-`PUT` cancels the one it replaces, which leaves the queue at once | Always admitted | — |
+| none | Chained per-message SSE/WebSocket/gRPC delays and close-socket delays (one per stream or connection) | Not bounded; counted in `mock_server_pending_delayed_tasks` only | Always admitted | — |
+
+Defaults for both properties are the heap ceiling / 64 KB, capped at 100,000; the 1,000 floor applies only
+when the JVM reports no heap ceiling. `0` removes a limit.
+
+Admission is a compare-and-set on each budget's counter (`Scheduler.tryAdmit`): a refused task never
+raises the counter, so refusals cannot inflate `mock_server_pending_delayed_tasks` or the `get*Count`
+readers, and concurrent refusals cannot make a free slot look full. A budget's count still exceeds its
+limit by design when a multi-frame WebSocket reply set is admitted below it.
+
+**Rationale for the choices.**
+
+- *Admission control, not an event-loop timer.* Moving delays to `eventLoop().schedule` or a
+  `HashedWheelTimer` was rejected: Netty's scheduled-task queue is an unbounded binary heap like
+  `ScheduledThreadPoolExecutor`'s `DelayedWorkQueue`, and `HashedWheelTimer` is unbounded unless given
+  `maxPendingTimeouts`, so neither bounds anything by itself. The memory is in the closure each entry
+  retains, whatever holds it. An event-loop timer would also run the fire-time work (event logging, OpenAPI
+  response validation, breakpoint matching) on the I/O thread, and `CallerRunsPolicy` for a full template
+  queue would render on the worker event loop — the stall the template-action pool exists to prevent.
+- *Chaos latency on a forwarded response degrades instead of refusing.* By the time it applies the upstream
+  request has been sent; a 503 would invite a client retry that repeats a non-idempotent upstream call, and
+  for a streaming upstream the response writer would never subscribe, leaving the upstream connection open.
+- *Side actions are shed on their own budget.* No client waits for them, so dropping one under overload
+  (as drift analysis already does) is the least harmful outcome, and a separate budget means a webhook
+  backlog can never make an unrelated mock answer 503. The worst case held is therefore bounded delayed
+  tasks up to three times `maxPendingDelayedResponses` (responses, side actions, WebSocket reply frames —
+  the last plus the frames of one set, since a set is admitted whole), plus up to `maxQueuedTemplateActions`
+  queued renders, plus one timed transition per scenario, plus the per-stream delays in the last row.
+- *WebSocket bidi replies are backpressured, then refused whole, never shed.* A client is waiting for the
+  whole reply set (a realtime LLM turn, for example), so dropping frames at a budget boundary would deliver
+  a partial reply silently. The first bound is per connection: while more than 128 reply sets with a delayed
+  frame are pending on it, the connection stops reading, so TCP flow control slows the client instead of
+  its sets piling up; reading resumes at 64. The frames decoded from the socket read that crossed the
+  threshold are still processed, so a connection can exceed it by one read's worth (at most 64 KiB of
+  input). The global backstop admits a set only while fewer than `maxPendingDelayedResponses` reply frames
+  are waiting (its own budget, so a WebSocket flood cannot 503 an HTTP mock) and otherwise closes the socket
+  with `1013` (Try Again Later), sending no frame of the refused set. The threshold is a constant, not a
+  property: pausing only slows a client that has more than 128 replies outstanding, and the global bound is
+  already configurable.
+- *A reply set is one chain, not one task per frame.* Its frames are sent in order of their delay (each
+  measured from the match, as before), keeping configured order among equal delays, one after another on a
+  single chain that holds one scheduler task at a time. Scheduled independently, frames with equal delays
+  could run on different pool threads and reach the socket out of order.
+- *Admission counters, not bounded queues,* so both limits resize at runtime
+  (`Scheduler.applyConfigurationCapacity()`, called from `HttpState.applyConfigurationUpdate`) at the cost
+  of one increment and one compare per delayed dispatch. Undelayed dispatches allocate no wrapper
+  (`HttpActionHandler.rejectableIfDelayed`, and the empty-delay check in `writeResponseActionResponse`);
+  templates are always wrapped because the queue bound applies without a delay.
+
+**What a refused request has already done.** Refusal happens at dispatch, after matching, so for a request
+answered `503`: the expectation's match was counted (a `Times.once()` expectation refused once is used up);
+when the refusal is of the delayed write, the rate-limit token was taken and chaos fault metrics were
+counted; and no `EXPECTATION_RESPONSE` entry is logged for it (the request itself is logged as received).
+Refusals are reported by `mock_server_overload_rejections` (only when `metricsEnabled`), by
+`Scheduler.getOverloadRejectionCount(reason)` (always), and by a WARN at most every 10 seconds per reason
+carrying the count since the previous line and the running total — so rejections after the last line are
+not logged until the next one.
+
+In synchronous (WAR/servlet) mode delays sleep on the request thread, nothing is queued and no bound applies.
+
+**Pausing reads.** Several handlers pause a connection's reads: pending WebSocket replies, a TCP chaos
+latency queue, a parked inbound breakpoint frame, WebSocket relay backpressure, the connection delay, the
+queue of binary messages waiting to be forwarded and a binary relay's two connections (each while the other
+cannot take more). They all go through `ChannelReadPause`, a per-channel hold
+count: auto-read turns off with the first hold and back on only when the last is released, so one holder
+finishing cannot resume reads another still needs paused.
+Releasing the last hold always issues a read. `LingeringClose`, `ConnectionReset` and
+`HttpChunkLineLimiter`'s rejection turn auto-read back on directly, to read and discard what the client still
+sends; done under a hold, the read that triggers is dropped by the gate below, and auto-read is already on when
+the hold ends, so without that read the socket was never read again (`ChannelReadPauseTest`).
+The first hold also installs a gate at the head of the pipeline that drops read requests while any hold
+remains. Without it, turning auto-read off did not stop reading: a decoder that saw no complete message, or
+the `HttpContentDecompressor` left in a WebSocket pipeline after the upgrade, calls `ctx.read()` after every
+read while auto-read is off, which kept draining the socket. A paused connection counts as busy, so the idle
+timeout never closes it.
+
+**Other executors on the request path** and whether each is bounded:
+
+| Executor / queue | Work | Bounded by |
+|------------------|------|-----------|
+| Shared scheduler, undelayed tasks | Forward continuations, lazy `once()` removal, before-actions, undelayed side actions | Not admission-bounded — must-run work that cannot be answered with a 503. Each belongs to a request already being served, so they are bounded by the requests in flight (open connections x HTTP/2 streams, capped by `maxInboundConnections` when set), and a forward continuation waits at most `maxFutureTimeout`; tracked by `mock_server_scheduler_queued_tasks` |
+| Shared scheduler, drift analysis | Best-effort forwarded-response drift analysis | Self-bounded to `max(16, 4 x actionHandlerThreadCount)`; excess dropped and counted |
+| `ScenarioManager` timed transitions (`scheduleCancellable`) | One delayed transition per scenario from `PUT /mockserver/scenario` carrying `transitionAfterMs` | One queued task per scenario: a later `PUT` with a transition cancels the pending one, and the scheduler's remove-on-cancel policy frees its queue slot at once. A `PUT` without a transition leaves a pending one in place (it fires only if the state still matches) |
+| Local-callback pool | Class callbacks | No queue (`SynchronousQueue`); threads deliberately unbounded to avoid the recursive loopback self-deadlock ([optimisation-safety.md](optimisation-safety.md) hazard 5). Its delay stage is bounded above |
+| JavaScript watchdog (`PolyglotRunner`) | Template timeout | One per in-flight JavaScript render, so bounded by the template pool |
+| `MatchingTimeoutExecutor`, `WasmRuntime` | Regex/XPath matching, WASM rules | `SynchronousQueue` with a thread cap and `AbortPolicy` |
+| Breakpoint timeout schedulers | Held-exchange timeouts | `breakpointMaxHeld` |
+| `LoadScenarioOrchestrator` scheduler | VU pacing and think time | One pending task per virtual user (`loadGenerationMaxVirtualUsers`) |
+| `ForwardRetryPolicy` backoff (`CompletableFuture.delayedExecutor`) | Forward retries | In-flight forwards x `forwardProxyRetryCount` |
+| `ChaosExperimentOrchestrator` scheduler | Experiment stage timers | Control plane, one per experiment stage |
+| WebSocket bidi replies (`WebSocketReplySender`) | Delayed reply frames to each inbound frame | Per connection by pausing reads above 128 pending sets; globally by `maxPendingDelayedResponses` reply frames, refusing a whole set with close `1013`; see the rationale above |
+| `TcpChaosHandler` (`eventLoop().schedule`) | TCP latency/bandwidth fault injection | Per connection: inbound reads wait in one FIFO queue with one timer, and the connection stops reading while more than 64 KiB is queued (resuming at 32 KiB), so at most 64 KiB plus one socket read is held; queued buffers are released on close |
+
+## Proxy Forwarding
+
+When no expectation matches and the channel is in proxy mode, `HttpActionHandler` forwards via `NettyHttpClient`:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant MS as MockServer
+    participant NH as NettyHttpClient
+    participant T as Target Server
+
+    C->>MS: HTTP Request
+    MS->>MS: No expectation match
+    MS->>MS: Check loop prevention header
+    MS->>MS: Check proxy authentication
+    MS->>NH: sendRequest(request, targetAddress)
+    NH->>T: Forward request
+    T->>NH: Response
+    NH->>MS: CompletableFuture<HttpResponse> completes
+    MS->>MS: Log FORWARDED_REQUEST
+    MS->>C: Response (with hop-by-hop headers stripped)
+```
+
+### How a Failed Connect Is Reported
+
+An HTTP request sent through `NettyHttpClient.connectFresh` (every HTTP forward, and the Java client) whose
+connect attempt fails (`Connection refused: …`, `connection timed out after … ms`,
+`UnknownHostException`) fails with that reason, and not with the generic `Channel handler removed
+before valid response has been received` that the failed channel's teardown produces. The generic
+exception is still what a channel reports when it is the channel itself that failed: the table below.
+
+`connectFresh` gives each new channel its own future as the `RESPONSE_FUTURE` attribute the client
+handlers complete, and relays it to the request's future only from the connect listener's success
+branch. A channel that failed to connect is closed and its handlers removed all the same, which
+completes that channel future with the generic `SocketConnectionException`. Netty can finish that
+teardown before the calling thread has attached its listener to the connect future, so if the handlers
+completed the request's future directly the teardown would sometimes be reported in place of the cause.
+
+| Case | What the request fails with |
+|---|---|
+| Connect refused, timed out, or host unresolvable | the connect cause |
+| The channel's pipeline could not be built (for example the client TLS context cannot be created from `forwardProxyPrivateKey` / `forwardProxyCertificateChain`, or a proxy handler cannot be constructed) | `ClientConfigurationException`, a `SocketConnectionException` whose cause is the initialisation error |
+| TLS handshake fails on a connected channel (untrusted certificate, host name mismatch, an upstream that does not speak TLS, handshake timeout) | `SocketConnectionException` whose cause is the handshake's `SSLException` |
+| The upstream closes the connection during the handshake | `SocketConnectionException` whose cause is an `SSLHandshakeException` saying `upstream closed the connection during the TLS handshake` (Netty reports it as a `ClosedChannelException` with a suppressed `SSLHandshakeException`; `ExceptionHandling.upstreamHandshakeFailure`) |
+| An HTTP/2 connection error with a request in flight | `SocketConnectionException` whose cause is the `Http2Exception` |
+| A TLS fault on an established HTTP/2 connection with a request in flight | the `DecoderException` itself, which Netty's `Http2MultiplexHandler` passes to the active streams when its cause is an `SSLException`; otherwise `SocketConnectionException` whose cause is the `SSLException` |
+
+`HttpClientInitializer.initChannel` catches a failure to build the pipeline, fails the channel's
+`RESPONSE_FUTURE` with a `ClientConfigurationException` and closes the channel, so Netty's
+`ChannelInitializer` no longer logs it. The connect then fails on the closed channel with a
+`ClosedChannelException`, and `connectFresh` reports the channel's outcome in its place. A failed handshake,
+an HTTP/2 connection error and a TLS fault are raised in handlers after `HttpClientConnectionErrorHandler`,
+which never sees them: `HttpOrHttp2Initializer` (from the handshake's `SslHandshakeCompletionEvent`, which is
+all Netty reports for a timeout or a close during the handshake; on a binary forward, `HttpClientHandler`) and `Http2ForwardConnectionExceptionHandler` fail the waiting request with
+them before the connection closes, and for an exception it does not recognise the HTTP/2 handler does the same
+before it closes the connection (see
+[netty-pipeline.md](netty-pipeline.md#exceptions-on-a-connection-to-an-upstream)). An `SSLException` that a
+non-TLS I/O failure caused (Netty's `failure when writing TLS control frames` when a proxy refuses the tunnel
+or the connection closes) is left to that failure, which
+reaches the request through `HttpClientConnectionErrorHandler` as before (`ExceptionHandling.tlsFailure`).
+
+Each is wrapped in the `SocketConnectionException` the request failed with before, so a caller that catches it
+(the Java client's `hasStarted` and `isRunning`, for example) still does, and a request on a reused pooled
+connection is still sent again on a new one. The message names the upstream and the cause, bounded by
+`ExceptionHandling.boundedFaultDescription` (Netty's hex dump of a non-TLS answer becomes its byte count).
+
+### How a Failed Forward Is Answered
+
+`HttpActionHandler` asks `upstreamFailureReason` first, before its connection-failure branch, for an
+expectation's forward (`handleExceptionDuringForwardingRequest`), an unmatched proxied request
+(`handleUnmatchedForwardFailure`) and a request sent through a proxy-pass mapping (`handleProxyPassFailure`), all
+through `returnedUpstreamFailureReason`. For the four reasons it names, the request is logged once at `ERROR`, with
+the request and the bounded cause, and the client gets a `502` whose body is the reason:
+
+| Cause | `502` body |
+|---|---|
+| Configuration error | `connection to the upstream could not be set up: RuntimeException: Exception creating SSL context for client` |
+| TLS (any `SSLException` in the cause chain) | `TLS with the upstream failed: SSLHandshakeException: PKIX path building failed: …`; with OpenSSL, whose message is `General OpenSslEngine problem`, the root cause follows: `…; caused by CertificateException: No subject alternative names present` |
+| HTTP/2 error (any `Http2Exception` in the cause chain) | `HTTP/2 error from the upstream: PROTOCOL_ERROR: Frame of type 0 must be associated with a stream.` |
+| HTTP/1.1 response that could not be decoded (`UndecodableResponseException`) | `response from the upstream could not be decoded: IllegalArgumentException: No colon found` |
+| A connection that could not be made, or a pooled one lost before the response | the cause and what to change: see [Connection Causes](#connection-causes) |
+| Anything else | as before: no body; a connection failure is logged at `TRACE` on the first two routes, and at `INFO` as `proxy pass forwarding failed for <target>: ...` on a proxy-pass mapping |
+
+The body holds only text from the TLS, HTTP/2, set-up or decoding code, bounded as a log entry's fault is (each
+message cut at 256 characters, a non-TLS answer shown as its byte count); for a configuration error only the
+top-level message, because a deeper cause may quote a configured file. Header values and body bytes are never
+quoted, though an HTTP/2 message or the decoder's can name a header (`invalid header name [...]`), and the
+decoder's can quote the first word of a status line that is not HTTP (`invalid version format: ...`). The connection-level entry that
+`HttpOrHttp2Initializer` or `Http2ForwardConnectionExceptionHandler` logs is then `DEBUG`; it stays `WARN` when
+no request is waiting (an idle pooled connection), where it is the only record. For an expectation's forward the scheduler's
+`INFO` entry for a failed response future, which repeats the exception's message, is skipped for these
+reasons, and a proxy-pass mapping never writes it, so the `ERROR` is the request's one entry.
+
+With `redactSecretsInLog` on, the request's credential values are masked in each message before it is cut, for
+the reason (in the entry, the `502` body and its `INFO` entry) and for the cause the entry attaches
+(`LogEntry.credentialScrub` and the scrub overloads of the `ExceptionHandling` bound helpers). The render-time
+redaction matches whole values only, so a credential cut at character 256 would otherwise keep its first part.
+
+A configuration error or an undecodable response is not a transient failure: `ForwardRetryPolicy.isTransientFailure`
+is false for it, so it is not retried. The circuit breaker records a configuration error, like a header-limit
+refusal, as neither a success nor a failure (`recordNeutral`), and an undecodable response as a success, since the
+upstream answered. A TLS or HTTP/2 failure counts as a failure.
+
+#### Connection Causes
+
+When none of those reasons applies, `UpstreamConnectFailure.reason` names a connection that could not be made, or a
+pooled one that was lost, and the `502` body is its text: the cause, then what to change. It walks the cause chain
+only after the forward has failed, so a forward that succeeds costs nothing more. Neither the text nor its `INFO`
+entry names the upstream's host or address (the request, and on a proxy-pass mapping its `INFO` entry, already say
+where it was sent). The failure is logged at `TRACE`, with the request, the target and the reason, as a connection
+failure was before; a host name that did not resolve, which used to be an `ERROR` with a stack trace, is now logged
+the same way. For an expectation's forward the scheduler's `INFO` entry for the failed response future is skipped for
+these causes too, as it is for the reasons above, except a loop, which only the action shows.
+
+| Cause (first match in the chain) | `502` body starts |
+|---|---|
+| `UpstreamProxyUnreachableException` | `upstream proxy set by forwardHttpProxy could not be reached (it refused the connection): ...`; the property comes from the exception, the bracket from its cause |
+| `PooledConnectionClosedException` | `upstream closed the pooled keep-alive connection the request was sent on without answering, and a POST is not sent again ...: if the upstream closes idle connections, set forwardConnectionPoolIdleTimeoutMillis below its keep-alive timeout or set forwardConnectionPoolEnabled to false; otherwise the upstream may have closed the connection to reject the request` |
+| `UnknownHostException`, `UnresolvedAddressException` | `upstream host name could not be resolved: ...` |
+| Netty's `ConnectTimeoutException`, or a `ConnectException` saying `timed out` | `connection to the upstream timed out: ...`, naming `socketConnectionTimeoutInMillis` except for a request proxied only because its Host is not MockServer's, which connects with a fixed one second timeout |
+| A `SocketException` saying `Connection refused` | `upstream refused the connection: ...` |
+| `NoRouteToHostException`, or a `SocketException` saying `unreachable` | `upstream address could not be reached (no route to it): ...` |
+| `BindException`, or any exception saying `assign requested address` or `Too many open files` (on epoll a channel that cannot be created is a `ChannelException` over Netty's `NativeIoException`) | `MockServer ran out of local ports or open files to connect to the upstream: ...`, which says a forward to MockServer itself is the usual cause |
+
+For an expectation's `httpForward` whose host is a loopback address or the address the request arrived on
+(`HttpRequest.localAddress`, compared as text) and whose port is the one it arrived on, a loop hint (`the forward's
+target is the address MockServer received the request on, so the request may have been forwarded back to MockServer
+itself ...`) is added only where a loop is likely: after the local-resources text, or as the body of a failure no cause
+in the table names, whose own entries (the `ERROR` with its message, or the `TRACE` connect entry) are kept and whose
+`INFO` entry gets the hint appended. It never replaces a named cause: a loopback target on that port can be another
+process when MockServer listens on one address only.
+
+`NettyHttpClient` marks a pooled connection's failure: a request on a reused connection that failed before any of its
+response arrived only because the connection closed or was reset (`HttpClientConnectionErrorHandler`'s
+`SocketConnectionException` with no cause, or a reset or broken pipe), and was not sent again because its method is
+not idempotent, fails with `PooledConnectionClosedException` around the failure it failed with before. A failure that
+names its own cause (TLS, an HTTP/2 error, an unexpected exception on the connection) is left as it was. An upstream
+that closes a connection to reject a request looks the same as one that closed it while idle, so the text says both. It is a
+`SocketConnectionException` whose message and string form are its cause's, so callers and logs see what they saw
+before. Before this change such a request's `502` had no body and the log said only that the channel closed.
+
+A forward expectation that targets MockServer itself is answered by the same expectation again, and each hop opens a
+new connection until local ports run out (in about nine seconds on macOS). The innermost hop's forward fails, its
+`502` gives the local-resources text with the loop hint, and each outer hop relays that `502` as the upstream's
+answer, so the client gets it. Only the failure is explained: the loop itself is not stopped.
+
+The MCP `explain_forward_failure` tool reads these reasons back without re-classifying anything:
+`HttpState.explainForwardFailures` takes the event log's `failed to forward request` entries (the `INFO` entry
+`returnBadGateway` writes with each `502`), most recent first or by correlation id, and `ForwardFailureExplainer`
+reports each one's request, status code and logged reason (scrubbed as the entry renders it, capped at 2,048
+characters), whether the `502` body named the cause, and whether the reason carries the loop hint.
+
+An upstream proxy (`forwardHttpProxy`, `forwardHttpsProxy` or `forwardSocksProxy`) that cannot be reached is a
+configuration problem too. When the forward client's connection to the proxy fails (its name does not resolve, it
+refuses the connection, or the connect times out), `NettyHttpClient.connectFresh` fails the request with
+`UpstreamProxyUnreachableException` wrapping the connect failure, and logs one `WARN` per proxy address for the
+client's lifetime. For `forwardHttpsProxy` and `forwardSocksProxy` Netty's `ProxyHandler` redirects the connect to the
+proxy, so the connect future reports only the proxy; a failure the proxy reports after it accepted the connection (a
+`CONNECT` answered with a non-200 status, a SOCKS failure reply, the proxy closing the tunnel before answering, or its
+handshake timing out) is the target's, as before, since some proxies close rather than answer when they cannot reach
+the target. The wrapper is neutral for the breaker and not retried, and reads as its cause (`getMessage` and
+`toString` are the cause's), so every route logs the failure at the levels the cause alone gets. It carries the
+property that set the proxy, and the `502` names that property and what happened to the connection rather than
+blaming the target (see [Connection Causes](#connection-causes)). Only the forward
+client's connections are classified (an HTTP forward's, and a binary relay's connection to the proxy it tunnels
+through): a client that is not the forward client (`forwardProxyClient` false) fails with the connect failure itself.
+A binary relay's `CONNECT` that the proxy answers with a status other than 200 fails with a message naming the proxy,
+its setting and the status ([netty-pipeline.md](netty-pipeline.md#through-an-upstream-proxy)).
+
+### Streaming Forward Path
+
+When the upstream response is a streaming response, and `streamingResponsesEnabled` is `true` (default), MockServer relays chunks incrementally rather than buffering the entire body. A response is treated as streaming when **either** its `Content-Type` is `text/event-stream`, `application/vnd.amazon.eventstream` (Bedrock) or `application/x-ndjson` (Ollama) **or** the forwarded request declared streaming intent (`Accept: text/event-stream`, a JSON body with `"stream": true`, or a Gemini `:streamGenerateContent` path, whose streamed JSON array arrives as `application/json`) — the latter (`EXPECT_STREAMING_RESPONSE`) covers content-type-less streaming backends such as the OpenAI Codex endpoint, and is threaded onto the HTTP/1.1 forward, HTTP/2 forward (parent → per-stream child), and transparent CONNECT-relay loopback paths alike (see [netty-pipeline.md](netty-pipeline.md#streamingawarehttpobjectaggregator)). Both signals apply to every proxied response, whatever the host, not only to LLM providers. Ordinary chunked responses without either signal are aggregated normally.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant AH as HttpActionHandler
+    participant NH as NettyHttpClient
+    participant SR as StreamingResponseRelayHandler
+    participant SB as StreamingBody
+    participant T as Target Server
+
+    AH->>NH: sendRequest(request, targetAddress)
+    NH->>T: Forward request
+    T->>SR: HTTP response head (streaming detected)
+    SR->>SR: Build head-only HttpResponse with StreamingBody
+    SR->>AH: Complete RESPONSE_FUTURE immediately
+    AH->>C: Write response head to client
+
+    loop For each SSE / chunked data chunk
+        T->>SR: HttpContent chunk
+        SR->>C: Forward chunk to client immediately
+        SR->>SB: Append to bounded capture buffer
+    end
+
+    T->>SR: LastHttpContent
+    SR->>AH: Signal stream complete
+    AH->>AH: Log FORWARDED_REQUEST (captured bytes as body)
+    SR->>C: Write LastHttpContent
+```
+
+A forwarded LLM response relayed this way is also read for its token usage as it passes:
+`HttpActionHandler` registers an `LlmStreamUsageScanner` with `StreamingBody.observeChunks` before the
+response is written. The observer sees every chunk on arrival (including chunks that arrived before
+the writer subscribed, and past the capture limit), holds at most a few KiB, and cannot affect the
+relay: an observer that throws is dropped. See
+[Proxied LLM usage and cost](llm-mocking.md#proxied-llm-usage-and-cost).
+
+Key behavioural points:
+
+- The `CompletableFuture<HttpResponse>` completes at **response-head time** (not after the full body is received), so the global socket timeout (`maxSocketTimeoutInMillis`) no longer applies to the streamed portion. A per-stream `IdleStateHandler` enforces `streamIdleTimeoutSeconds` instead, while MockServer is reading the upstream: `StreamIdleTimeoutHandler` ignores an idle event while more than the read watermark waits for the client (`StreamingBody.isAwaitingClient()`), because reads are then withheld on purpose, so a slow or paused client keeps its stream. A body nothing has subscribed to (a streamed response replaced or dropped before it was written) is never awaiting a client, so its upstream still times out; a breakpoint `CLOSE` closes the upstream directly. An upstream that closes, fails, or sends invalid framing mid-stream also ends the client's response without its terminating chunk (`StreamAbortedException`; `StreamedResponseDecoderResultGuard` turns a codec's failed decoder result into that abort before a decompressor can replace it with a clean end), while a body the upstream delimits by closing its connection still ends normally. When the client has gone, the writer closes the upstream (`StreamingBody.closeUpstream()`). A stream that times out fails with `StreamingBody.IdleTimeoutException` and, like a bound abort, ends the client's response without its terminating chunk (HTTP/2, HTTP/3: reset).
+- The full stream reaches the client unless it is aborted (next point). The capture buffer is bounded to `maxStreamingCaptureBytes` (default 256 KB). When exceeded, the logged body is truncated and the `FORWARDED_REQUEST` log entry carries `x-mockserver-stream-truncated: true`.
+- The decoded bytes relayed but not yet written to the client are bounded by `maxResponseBodySize`, the limit the same response would have had aggregated: a decoder expands one upstream read at once (one read of `zstd` can decode to about 2 GiB), so read pacing alone cannot bound them. When a chunk would pass the bound, `StreamingBody` fails with `UnwrittenBytesLimitExceededException`, `StreamingResponseRelayHandler` logs a `WARN` and closes the upstream, and the writer closes the client's connection (HTTP/2, HTTP/3: resets the stream) without the terminating chunk, so the client sees an incomplete response. `chunkWritten` requests the next upstream read only once the backlog has drained to min(64 KiB, bound / 4) (as does `subscribe`, for chunks that arrived before it), so a slow client gets backpressure however many chunks a read holds, and only a single read that decodes to more than the bound is aborted; the time a slow client spends draining does not count towards the stream idle timeout (previous point). The CONNECT relay's HTTP/1.1 loopback applies the same bound with `maxRequestBodySize`, stopping its reads above min(256 KiB, bound / 2) unwritten until the backlog halves; raw bytes (an `error()` action's `responseBytes`) count toward that pause but not toward the bound. See [memory-management.md](memory-management.md#decompressed-bodies).
+- Non-streaming responses are unaffected — `StreamingAwareHttpObjectAggregator` detects the response type and delegates to the standard `HttpObjectAggregator` path for non-streaming responses.
+- `FORWARD_REPLACE` (`overrideHttpResponse`) disables streaming **only when the response modification needs the full response body**: a body/schema response override, a JSON body patch/merge-patch modifier, or a response template. In those cases `HttpOverrideForwardedRequestActionHandler` passes `disableStreaming=true` through `HttpForwardAction.sendRequest` to `NettyHttpClient.sendRequest`, which sets the `DISABLE_RESPONSE_STREAMING` channel attribute; `StreamingAwareHttpObjectAggregator.channelRead` then always delegates to the standard `HttpObjectAggregator` path so the response is fully aggregated regardless of `streamingResponsesEnabled`. A **header-only** modification (status / headers / cookies with no body change — decided by `HttpOverrideForwardedRequestActionHandler.isHeaderOnlyResponseModification`) is instead applied to the streamed response **head** while the body chunks are relayed untouched, so streaming is preserved — e.g. adding a CORS or trace header to an SSE / LLM upstream no longer breaks the stream.
+- WAR deployments (`ctx == null`) always use the buffered path.
+
+### Bodies with No Content-Type
+
+A body that arrives with no `Content-Type` is forwarded byte-identical on every path, because the
+decoder keeps its raw bytes whenever a String view could not reproduce them.
+
+| Received bytes | Decoded as | Matchers and control plane read | Retrieve requests / request-responses show | Dashboard and log entries show |
+|---|---|---|---|---|
+| Valid UTF-8 (JSON, text, …) | `StringBody` (no content type), raw bytes kept | the UTF-8 text | the text, as before | the text, as before |
+| Not valid UTF-8 (binary, Latin-1 text, …) | `BinaryBody` (no content type), raw bytes kept | the lenient UTF-8 decode (malformed bytes become U+FFFD), as before | `{"type":"BINARY","base64Bytes":…}` with no `contentType` | a base64 string (the log-entry body rendering); with `redactSecretsInLog` on it is redacted first, see below |
+
+The rule lives in `BodyDecoderEncoder.bytesToBody`, which every inbound request (HTTP/1.1, HTTP/2,
+servlet) and every forwarded or proxied upstream response goes through; the HTTP/3 request bridge
+calls it for every body too. The streamed-response capture
+(`HttpActionHandler.setCapturedStreamingBody`) uses a similar but looser sniff for display only: it also
+rejects control bytes and tolerates one replacement character from a truncated tail, which a
+byte-identical forward cannot. Previously every such body became a
+`StringBody` decoded as UTF-8, and `bodyToBytes` re-encoded that String on the way out, so each
+malformed byte turned into U+FFFD (three bytes): 1,000,000 random bytes left MockServer as ~1.8–2 MB,
+and the String copies cost two to three times the body in heap.
+
+`bodyToBytes` needed no change: a `BinaryBody` is written from its raw bytes, and a valid-UTF-8
+String re-encodes to exactly the bytes it was decoded from.
+
+**Matching and the data-plane readers do not change.** The readers below interpret an inbound,
+forwarded or recorded body as text through `HttpRequest.getBodyAsText()` /
+`HttpResponse.getBodyAsText()` (both delegate to `BinaryBody.matchableString`). For a `BinaryBody` that
+has no content type of its own, on a message with no `Content-Type` header, that returns the lenient
+UTF-8 text such a body was always read as; any other body, including a user-authored
+`binary(bytes, MediaType.PNG)`, keeps its usual string form:
+
+- request and response body matching (`BodyMatching`), LLM conversation matching and every LLM codec's
+  decode, the embeddings and rerank request readers, `LlmProviderSniffer` and the LLM optimisation reports;
+- secret redaction (`FixtureRedactor`, behind `redactSecretsInLog` and the fixture exports): both the
+  field masking and the fail-closed "unparseable body" check, and the collection of body-field values
+  that are scrubbed from log messages. On every log surface — retrieve of requests and
+  request-responses, the JSON log-entry retrieve (`LogEntrySerializer`), the dashboard
+  (`DashboardLogEntryDTO`), and log messages and their arguments (console included) — `LogEntry` redacts
+  a `BinaryBody` *before* `updateBody` renders it as base64, since base64 would hide its fields; other
+  bodies are rendered first so a JSON body keeps its tree form. With redaction on and body fields
+  configured, a JSON-parseable body the redactor rewrites comes back as text (the masked JSON), not as
+  base64 or the `BINARY` shape;
+- the control-plane endpoints (expectations, GraphQL, AsyncAPI, Pact, configuration, bind) and the
+  built-in CRUD, OIDC, SCIM and SAML handlers, and the HTTP/3 MCP endpoint (which then reads the body
+  exactly as the TCP MCP path's raw UTF-8 decode does);
+- OpenAPI request/response validation and runtime expressions, GraphQL response synthesis, breakpoint
+  response conditions, response body patches (`HttpResponseModifier`), drift and diff analysis, load
+  response extraction, the curl rendering of a request, and the OpenAPI/Postman/Pact exports of
+  recorded traffic.
+
+The request matcher checks for a `BinaryBody` before looking up the `Content-Type` header, so other
+bodies keep their exact previous cost; during a matching scan the lenient decode is done once and
+shared by every candidate expectation through the scan-scoped `ParsedBodyCache`, so nothing is
+retained on the logged request. Response matching reads a user-defined `binary(bytes)` response with
+no content type and no `Content-Type` header the same way (as lenient text rather than base64).
+
+**The exceptions are callbacks, templates, WASM and the log/HAR renderings**, which keep a binary
+body's usual form (base64): `HttpRequest.getBodyAsString()` in Java callbacks, the `request.body`
+template value, the body handed to WASM response shapers, the body shown in log messages
+(`LogEntry.updateBody`) and HAR exports (which mark it `encoding: base64`). Code generation
+(`HttpResponseToJavaSerializer`) and user-authored template bodies also keep base64, since a binary
+body there was written by the user. `LlmPromptRedactor.redactBodyForPrompt` omits every `BINARY` body
+from the stub-generation prompt, so a non-UTF-8 body with no `Content-Type` is now left out of that
+prompt where it used to be sent as lossy text — the safe direction for a body that may hold secrets.
+A body whose `Content-Type` declares JSON or XML without a charset is still decoded as UTF-8; if its
+bytes are not valid UTF-8 they are still re-encoded lossily (out of scope: that content is malformed
+for its declared type).
+
+### Bodies with a Content-Encoding
+
+A request body sent with a `Content-Encoding` is forwarded as the exact bytes the client sent, on
+HTTP/1.1, HTTP/2 and HTTP/3, sent directly or through a CONNECT or SOCKS tunnel, unless MockServer changed
+it; a changed body is encoded in its coding again.
+
+```mermaid
+flowchart TD
+    A["forwarded request with a Content-Encoding"] --> B{"body and Content-Encoding\nunchanged since received?"}
+    B -->|yes| C["send getBodyAsOriginalRawBytes()\n(the wire bytes)"]
+    B -->|no| D{"first Content-Encoding value is one\nthe inbound decompressor decodes?"}
+    D -->|yes| E["encode the body in that coding"]
+    D -->|no| F["send the body as it is"]
+```
+
+| First `Content-Encoding` value | Decoded on the way in | Forwarded unchanged | Forwarded after an override, template or callback changed the body |
+|---|---|---|---|
+| `gzip`, `x-gzip`, `deflate`, `x-deflate` | yes | wire bytes | gzip / zlib of the new body |
+| `snappy` (raw block, as Prometheus remote-write sends, or framing format) | yes | wire bytes | the new body as a raw block, or framed if the original was framed |
+| `zstd`, `br` | when zstd-jni / Brotli4j load (zstd-jni ships in the jar through `kafka-clients`) | wire bytes | the new body in that coding, when the library loads |
+| a coding list in one value (`gzip, br`), `identity`, unknown | no | wire bytes | the body as it is, never encoded again |
+
+Only the first value counts, because that is the one Netty's decompressor reads: with two
+`Content-Encoding` headers the body is decoded (and, if changed, encoded again) by the first.
+
+The framing of a changed Snappy body is read from `originalBody`. An override keeps it; the data-plane
+request filter's result rules (`DataPlaneCopies`, see
+[domain-model.md](domain-model.md#deep-copies-for-the-data-plane-hooks-deepcopy-bodycopy)) clear `originalBody`
+for a changed body but keep a framed one, so a body a filter changed is framed again too.
+
+**How "unchanged" is known.** The transports call `HttpRequest.markBodyAsReceived()` on a request that
+arrived with a `Content-Encoding`: `FullHttpRequestToMockServerHttpRequest` for HTTP/1.1 and HTTP/2,
+`Http3MockServerHandler` for HTTP/3 (from the `content-encoding` flag `Http3RequestBridge.parseHeaders`
+sets in its one pass over the headers), and `HttpServletRequestToMockServerHttpRequestDecoder` for the
+WAR, whose container never decompresses. It records the body instance and the `Content-Encoding`
+values, and records nothing for a request without a body or a `Content-Encoding`. `isBodyAsReceived()`
+holds while both are the same, compared by identity for the body, so any `withBody` ends it; it is false
+for an unmarked request before any header is looked up, and the forward path reads the
+`Content-Encoding` header of an unmarked request only once, with no allocation. The record is transient
+(not serialised, compared or logged), and `clone()` / `shallowClone()` carry it, so an override that
+leaves the body alone still forwards the wire bytes. A request rebuilt from JSON (a template, a
+callback, a replay) is never marked, so its body is encoded from its decoded form rather than trusting
+a serialised original body.
+
+**CONNECT and SOCKS tunnels.** `RelayConnectHandler` decodes the tunnelled client's HTTP and relays
+each request to MockServer over a loopback connection. It no longer decompresses that request: on
+HTTP/1.1 it installs no decompressor, and on HTTP/2 it uses `InboundHttp2ToHttpAdapter` without a
+`DelegatingDecompressorFrameListener`. The request reaches MockServer still in its coding, with its
+`Content-Encoding`, and is decompressed and marked there like any other, so a tunnelled request is
+matched, recorded and forwarded exactly as a direct one. (Before, the relay decompressed with Netty's
+decompressor and dropped the header, so a tunnelled gzip body reached the upstream decompressed and a
+raw-block Snappy body was rejected.) The relay's response side, which decompresses MockServer's
+responses on their way back to the client, is unchanged.
+
+The relay still needs the decoded body for one thing: `UpstreamProxyRelayHandler` asks
+`StreamingAwareHttpObjectAggregator.requestExpectsStreamingResponse` whether a JSON body says
+`"stream": true`, so a streamed response with no `text/event-stream` content type (the OpenAI Codex
+backend) is relayed as it arrives rather than buffered. For a body with a `Content-Encoding` that check
+runs `MockServerHttpContentDecompressor` over the compressed bytes in 1 KiB slices, scanning each decoded
+piece (with a 256-character overlap, so a match split between pieces is found) and stopping at the first
+match, at `maxRequestBodySize` decoded bytes, or at a decoding error. The decoded pieces are released as
+they are scanned and the relayed bytes are never changed, so memory stays at one slice's output and the
+whole body is still searched, as it was when the relay decompressed it. Choosing to decode a bounded
+prefix was rejected because coding CLIs send `"stream": true` after a long message history; signalling
+from MockServer's side of the loopback was rejected because it needs a new internal header that must never
+reach a client. (Streaming of tunnelled responses is an HTTP/1.1-tunnel feature: the HTTP/2 loopback
+aggregates every response, compressed request or not.)
+
+When the relay cannot pass a response on (it fails to decode, is larger than `maxRequestBodySize`, or
+MockServer resets the stream), the tunnelled client is answered at once: over HTTP/2 its stream is reset
+(with MockServer's own error code, `REFUSED_STREAM` when the request never reached MockServer, otherwise
+`INTERNAL_ERROR`) and its other streams carry on; over HTTP/1.1 it gets a `502`, or, once a streamed
+response's head has gone, a closed connection. See
+[netty-pipeline.md](netty-pipeline.md#relay-failure-signalling).
+
+**Why a coding list is not encoded.** `MockServerHttpContentDecompressor`, like Netty's decompressor,
+compares the trimmed first value whole, so it never decodes a list in one value; a body under one is
+still in it, whether it came off the wire or was supplied by an override. Encoding it again was the old
+substring match's bug (`gzip, br` was gzipped a second time). `BodyContentEncodingEncoder` encodes
+exactly the codings the decompressor decodes, so a decoded body can always be encoded again, and
+nothing claims a coding MockServer cannot produce. A user who supplies an unencoded body under a
+coding list gets it forwarded unencoded: MockServer cannot tell it from an encoded one.
+
+**Raw Snappy blocks.** Netty's `SnappyFrameDecoder` accepts only the framing format and rejected a
+remote-write body ("…tag before STREAM_IDENTIFIER"), closing the HTTP/1.1 connection, resetting the
+HTTP/2 stream or closing the HTTP/3 stream, so a remote-write receiver could not be mocked.
+`SnappyBlockOrFrameDecoder` hands a body that starts with the framing format's stream identifier to
+`SnappyFrameDecoder` and decodes anything else as one block once the body ends. A block's varint
+preamble declares its decoded size, and before decoding it is refused as corrupt if that size is over
+`maxRequestBodySize`, or over 22 times the block's own length (Snappy writes at most 64 bytes per 3-byte
+element, so a short body cannot hold more). Netty's decoder reserves the whole declared size as soon as
+it reads the preamble, so these checks are what bound the allocation. The output buffer is capped at the
+declared size, so a block that decodes past it is refused too. A remote-write receiver is therefore
+limited by `maxRequestBodySize`, but an oversized block is refused like a corrupt body rather than
+answered 413. A body re-encoded as `snappy` uses the raw block format (`SnappyBlock`, the same
+snappy-java call MockServer's own remote-write exporter makes) unless the original body was framed.
+
+### Accept-Encoding on a forwarded request
+
+A forwarded or proxied request carries the client's own `Accept-Encoding` upstream, less the codings
+MockServer cannot decode, so whatever coding the upstream picks is one the forward client decodes
+before the response is recorded, matched and relayed. Until 9.0.0 every outbound request said <!-- version-ref:keep -->
+`Accept-Encoding: gzip,deflate`, whatever the client sent.
+
+| Client sent | Upstream receives |
+|---|---|
+| no `Accept-Encoding` | none |
+| `compress, zstd;q=0.9, gzip;q=0.5` | `zstd;q=0.9, gzip;q=0.5` (`zstd` only when zstd-jni loads) |
+| `gzip;q=1.0, *;q=0.1` | `gzip;q=1.0, deflate;q=0.1, zstd;q=0.1, identity;q=0.1` (`br`, `zstd` only when their library loads) |
+| `compress`, `gzip;q=0`, an empty value | `identity` |
+
+`ForwardedAcceptEncoding.forwarded` builds the value, and `MockServerHttpRequestToFullHttpRequest`
+sets it, so it applies wherever a request leaves through `NettyHttpClient`: the forward and
+override actions, callbacks, proxying (HTTP proxy, CONNECT and SOCKS tunnels through the loopback, and
+an HTTP/2 upstream, whose stream codec turns the same request into frames), streamed responses, and
+MockServer's own outbound calls (the Java client, LLM completions), which send whatever their request
+model holds, so a request with no `Accept-Encoding` no longer gains one. It keeps the elements
+in order with their parameters, joins several fields into one, keeps `identity` and every coding
+`BoundedZstdHttpContentDecompressor.decodes` accepts (so `x-gzip`, `x-deflate` and `snappy` too), and
+replaces `*` with the registered codings it covers (`gzip`, `deflate`, `br`, `zstd`, `identity`) that
+are decoded and not named elsewhere (`x-gzip` and `x-deflate` count as naming `gzip` and `deflate`). When no
+element left has a q-value above zero it sends `identity`, so `compress, *;q=0` still gets `identity`. An
+`Accept-Encoding` set by a forward override (`forwardOverriddenRequest`) is filtered the same way, since the
+overridden request goes through the same mapper.
+
+**No `Accept-Encoding`, none sent.** RFC 9110 section 12.5.3 reads a missing field as "no preference",
+while `identity` alone says only an unencoded response is acceptable; sending nothing keeps the client's
+request as it was. An upstream may then use any coding: one MockServer decodes is decoded as usual, and
+one it does not is relayed still encoded with its `Content-Encoding` and recorded encoded, which the
+client, having stated no preference, accepts.
+
+**What the client gets back.** Unchanged: a body in a coding MockServer decodes reaches the client and
+the recording decoded, without `Content-Encoding` and with its length adjusted, and the upstream's
+`Vary` is relayed as is. Identity is acceptable to every client that did not send `identity;q=0`, so
+the response is not encoded again for the client.
+
+**WebSocket upgrades** are relayed by `WebSocketProxyRelayHandler`, which already sends the client's
+handshake headers as they came (`Accept-Encoding` included) and never relays or records the body of a
+refused handshake, so it is unchanged.
+
+### ProxyPass (Reverse Proxy)
+
+The `proxyPass` configuration property allows MockServer to act as a reverse proxy, mapping incoming path prefixes to upstream servers with automatic path rewriting. This is evaluated in `HttpActionHandler.handleProxyPass()` after expectation matching and CORS, but before the speculative proxy attempt.
+
+Each mapping specifies a `pathPrefix` (e.g. `/api/`), a `targetUri` (e.g. `https://backend:8443/services/`), and an optional `preserveHost` flag. When a request path starts with the prefix, the path is rewritten (prefix stripped, target path prepended) and forwarded to the target host:port. The Host header is adjusted to match the target unless `preserveHost` is true.
+
+### Non-Proxy Hosts
+
+The `noProxyHosts` configuration property (comma-separated list) has two uses, both through `NoProxyHostsUtils.isHostOnNoProxyList()`:
+
+- **Upstream proxy bypass** (`NettyHttpClient`): a destination on the list is connected to directly, never through `forwardHttpProxy`, `forwardHttpsProxy` or `forwardSocksProxy`, as `no_proxy` works for curl and `http.nonProxyHosts` for the JVM. This covers HTTP requests (forwards, proxied requests, webhooks) and the binary relay's upstream connection.
+- **Speculative proxying** (`HttpActionHandler`): a request that matches no expectation and whose Host header is on the list gets a 404 instead of being proxied to that host.
+
+An entry is a host name, matched exactly (`example.com`); a domain suffix, `*.internal.corp` or `.internal.corp`, matching the domain itself and every name under it; or an IP address (`192.168.1.1`, `::1`), compared as an address, so `::1` and `0:0:0:0:0:0:0:1` match. Matching ignores case and the port. No name is looked up: an IP-address entry matches only a destination given as that address, never a name that resolves to it.
+
+`NettyHttpClient.upstreamProxiesFor` decides once per request which proxies apply: all those configured, or none for a listed destination. The destination is the `remoteAddress` the caller passes (its host string, a name or an IP literal), or, when that is null, the request's socket address or Host header, read without a lookup. The chosen set drives everything that depends on a proxy: whether the request goes to `forwardHttpProxy` (and gets an absolute-form URI and `Proxy-Authorization`), whether `HttpClientInitializer` adds the `CONNECT` or SOCKS5 handler, whether the bootstrap uses `NoopAddressResolverGroup`, and whether the connection may be pooled. `sendsThroughHttpProxy`, which `forwardProxyBlockPrivateNetworks` uses to decide whether to check the Host header too, makes the same decision. A direct connection to a listed host is checked by `forwardProxyBlockPrivateNetworks` like any direct connection. The binary relay asks the same question per target when it makes its upstream connection (`connectBinaryRelay`), so a listed target is relayed directly and any other is tunnelled through the proxy that applies, `forwardHttpProxy` included ([netty-pipeline.md](netty-pipeline.md#through-an-upstream-proxy)).
+
+### Destination Name Resolution Through an Upstream Proxy
+
+When a connection is tunnelled through an upstream proxy (`forwardHttpsProxy` for a secure request, otherwise `forwardSocksProxy`; `HttpClientInitializer.tunnelProxy` decides, and adds the matching `HttpConnectProxyHandler` or `Socks5ProxyHandler`), `NettyHttpClient` keeps the destination unresolved (`SocketAddresses.unresolvedUnlessIpLiteral`) and connects with Netty's `NoopAddressResolverGroup`, so the tunnel handler sends the proxy the name and the proxy resolves it. Without the no-op resolver Netty's default resolver looks an unresolved address up on the event loop before the tunnel handler sees it, which fails where only the proxy can resolve external names. An IP-literal destination is sent as an address. The CONNECT tunnel's destination (`PortUnificationHandler`, `PROXIED_` message) and the circuit breaker's key are also built without a lookup. With no tunnel proxy, or for a destination on `noProxyHosts`, the destination is resolved where MockServer runs.
+
+`forwardProxyBlockPrivateNetworks` is checked on every forward and proxy route (every forward action, the unmatched-proxy route including `proxyRemoteHost` and `proxyPassMappings`, the binary relay, the WebSocket relay) on the target name before the request reaches `NettyHttpClient`'s connect, by a lookup where MockServer runs, so deferring resolution does not bypass it: a name that does not resolve locally is refused, and a name that does is vetted by its local answer, although the proxy resolves it again to connect. A request sent through `forwardHttpProxy` also has its Host header checked, as that proxy is sent it as the URI. Without an upstream proxy the forward client checks the destination again itself, resolving it once, and connects to that address, so the name is not looked up a second time. See [tls-and-security.md](tls-and-security.md#forward-target-ssrf-validation).
+
+Since the CONNECT tunnel's destination is no longer resolved, an IP-address `noProxyHosts` entry does not match a clear request tunnelled to MockServer by host name, so that request goes through the upstream proxy; a host-name entry matches.
+
+### Validation Proxy (OpenAPI Contract Validation on Forwarded Traffic)
+
+When `validateProxyOpenAPISpec` is set (to an OpenAPI spec URL, file path, or inline JSON/YAML), MockServer validates every forwarded/proxied request and its upstream response against the spec. This applies to both the unmatched proxy forward path and the ProxyPass reverse-proxy path. Request violations are logged as `OPENAPI_REQUEST_VALIDATION_FAILED` and response violations as `OPENAPI_RESPONSE_VALIDATION_FAILED` log entries.
+
+By default, validation is **report-only**: traffic flows unmodified and violations are only logged. When `validateProxyEnforce` is set to `true`, non-conformant requests are rejected with a **400** status code before they reach the upstream, and non-conformant **buffered** (non-streaming) upstream responses are replaced with a **502**.
+
+**Streaming response limitation:** For streaming responses the body is written to the client as it arrives, before validation can inspect the complete body. In enforce mode, streaming responses are therefore validated in **report-only** fashion (violations logged but not blocked) even when `validateProxyEnforce=true`. Non-streaming responses are fully enforced.
+
+The validation uses `OpenAPIRequestValidator` for requests and `OpenAPIResponseValidator` for responses (response-only, avoiding the double request validation that `OpenApiTrafficValidator` would perform). Both validation phases run off the Netty event loop (inside the scheduler thread pool) to avoid blocking I/O threads on cold-cache OpenAPI spec parsing or JSON-schema validation.
+
+```mermaid
+flowchart TD
+    REQ([Forwarded Request]) --> SPEC_CHECK{"validateProxyOpenAPISpec\nset?"}
+    SPEC_CHECK -->|No| FWD["Forward normally"]
+    SPEC_CHECK -->|Yes| REQ_VAL["Validate request\nagainst spec\n(off event loop)"]
+    REQ_VAL -->|Valid| FWD
+    REQ_VAL -->|Invalid + enforce=false| LOG_REQ["Log OPENAPI_REQUEST_VALIDATION_FAILED"] --> FWD
+    REQ_VAL -->|Invalid + enforce=true| R400["Return 400"]
+    FWD --> UPSTREAM["Upstream response"]
+    UPSTREAM --> STREAMING{"Streaming\nresponse?"}
+    STREAMING -->|No| RESP_VAL["Validate response\nagainst spec"]
+    RESP_VAL -->|Valid| RETURN["Return response"]
+    RESP_VAL -->|Invalid + enforce=false| LOG_RESP["Log OPENAPI_RESPONSE_VALIDATION_FAILED"] --> RETURN
+    RESP_VAL -->|Invalid + enforce=true| R502["Return 502"]
+    STREAMING -->|Yes| WRITE_STREAM["Write streaming response\nto client"]
+    WRITE_STREAM --> STREAM_VAL["Validate on stream\ncompletion (report-only)"]
+    STREAM_VAL -->|Invalid| LOG_STREAM["Log OPENAPI_RESPONSE_VALIDATION_FAILED"]
+```
+
+| Configuration Property | Type | Default | Description |
+|----------------------|------|---------|-------------|
+| `validateProxyOpenAPISpec` | String | `""` (disabled) | OpenAPI spec URL, file path, or inline payload to validate forwarded traffic against |
+| `validateProxyEnforce` | Boolean | `false` | When true, block non-conformant traffic (400 for bad requests, 502 for bad non-streaming responses). Streaming responses are validated report-only. |
+
+### OpenAPI Request Validation on the Mock Path
+
+The validation proxy above only validates **forwarded** traffic. By default a request matched by an
+OpenAPI-backed **mock** expectation (`Expectation.when(specUrlOrPayload, operationId)` / `openAPI(...)`) is
+**not** revalidated against the spec — the expectation matcher already screens the request, but it matches the
+request body loosely (a `jsonSchema` body matcher built with `withOptional`), so a malformed request that still
+matches the operation is served the mock response.
+
+When `validateRequestsAgainstOpenApiSpec` is set to `true`, MockServer additionally validates each matched
+request against the spec the matched expectation was built from, **after the match but before the action is
+dispatched** (in `HttpActionHandler.dispatchPrimaryAction`). A request that violates the spec is rejected with a
+**400** describing the violations and logged as `OPENAPI_REQUEST_VALIDATION_FAILED`, instead of serving the mock
+response. The check only applies when the matched expectation's request definition is an `OpenAPIDefinition`
+carrying a `specUrlOrPayload`; for plain `HttpRequest`-backed expectations it is a no-op. Validation uses
+`OpenAPIRequestValidator` and runs off the Netty event loop (inside `scheduler.submit`), mirroring the
+validation-proxy request path. The flag is **off by default and fully back-compatible**.
+
+| Configuration Property | Type | Default | Description |
+|----------------------|------|---------|-------------|
+| `validateRequestsAgainstOpenApiSpec` | Boolean | `false` | When true, requests matched by an OpenAPI-backed mock that violate the spec are rejected with a 400 instead of serving the mock response. OpenAPI-backed expectations only. |
+
+### Loop Prevention
+
+A forward expectation (including one that relays a WebSocket upgrade) or a `proxyPassMappings` entry whose target leads back to MockServer
+stops after `forwardLoopMaxHops` (default 10) hops with a `508 Loop Detected`; an unmatched request proxied back to the same MockServer is answered `404` on
+its first return. Each uses its own header and its own random per-instance `MockServer_<UUID>` id, new on each
+start, so another MockServer instance never counts as a loop. The forward id is generated by `HttpActionHandler`,
+separately from `HttpState`'s `x-forwarded-by` value: every forward's upstream sees the forward id, while a request
+carrying the `x-forwarded-by` value is not logged as received, so that value stays private to the unmatched path.
+
+```mermaid
+flowchart TD
+    R["Request matches a forward expectation"] --> C{"x-mockserver-forwarded-by holds
+this instance forwardLoopMaxHops times?"}
+    C -->|yes| L["508 Loop Detected, WARN logged,
+no connection opened"]
+    C -->|no| M["Forwarded request carries the received entries
+plus this instance's"]
+    M --> U["Upstream, possibly this MockServer again"]
+```
+
+| Path | Header | Check | Answer |
+|---|---|---|---|
+| Forward expectation (every `HttpForwardAction`) | `x-mockserver-forwarded-by`, one entry per forward | entries equal to this instance's id, `>= forwardLoopMaxHops` | `508 Loop Detected` (RFC 5842) with the cause and the fix as its body |
+| `proxyPassMappings` entry (`handleProxyPass`) | the same header and count | the same | `508`, naming the mapping's target URI as the thing to check |
+| WebSocket upgrade a forward expectation relays (`WebSocketProxyRelayHandler.relay` with a route) | the same header, on the upstream handshake | the same | `508` in place of the handshake; an outer hop relays an upstream's `508`, with a WARN, instead of answering `502` |
+| WebSocket upgrade proxied because no expectation matched | none: not counted, as for an unmatched HTTP request | | the relay's usual answers |
+| Unmatched request proxied onward | `x-forwarded-by` | holds this instance's id | `404` |
+
+**Why a counted entry per instance.** RFC 9110 Section 7.6.3 has each intermediary append a received-by entry to
+`Via`, and names avoiding request loops as one of its uses; `ForwardLoopGuard` keeps the same list shape under a
+MockServer-specific name. A forward back to the same MockServer can be intended (rewriting the path for another
+expectation to answer), so seeing its own entry once is not a loop; only `forwardLoopMaxHops` of them is. Counting
+only this instance's entries means a chain through other MockServer instances is never refused, and a loop between
+two instances is still caught by whichever reaches its limit first. `Max-Forwards` (Section 7.6.2) was not used: it
+is defined for `TRACE` and `OPTIONS` only and a client may set it. `Via` itself was not used: it would change what
+upstreams do (nginx's default `gzip_proxied off` stops compressing a response to any request carrying `Via`), and it
+would claim protocol details for each hop that a forward does not keep.
+
+**Behaviour.** `HttpForwardAction.sendRequest` asks `ForwardLoopGuard.loopDetectedResponse(received)` after the
+SSRF check and before the circuit breaker, so a refusal opens no connection, is never retried and does not count
+against the breaker. A refusal is a completed response like the breaker's `503`: the forward's response override
+is not applied, each outer hop relays the `508` as its upstream's answer, and a `FORWARD_WITH_FALLBACK` whose
+fallback codes include `508` (the default `500`–`599` does) returns its fallback. Otherwise
+`markForwarded(received, toSend)` sets the forwarded request's header to the received entries plus this instance's
+id, replacing whatever a template or callback put there, so a request built afresh on each hop is still counted.
+The recorded forwarded request does not get the header; the request sent upstream does. An intermediary that folds
+the entries into one comma-separated line is still counted. `forwardLoopMaxHops=0` turns both the check and the
+header off. `TransportHeaderFilter` drops `x-mockserver-forwarded-by` from recorded expectations, because its value
+identifies one run of one instance and could never match again.
+
+`proxyPassMappings` and the WebSocket passthrough do not go through `sendRequest`, so they apply the same
+`ForwardLoopGuard` themselves; `HttpActionHandler` owns the one guard (and so the one id) and hands it to each forward
+handler and to the relay. `attemptWebSocketPassthrough` passes the relay a route only for a matched forward; the unmatched
+proxy path passes none, so it neither counts nor sends the header, like unmatched HTTP proxying (which has the
+`x-forwarded-by` check instead). `handleProxyPass` checks after `forwardProxyBlockPrivateNetworks` and before the upstream
+send, and marks the request it sends. The relay checks after `forwardProxyBlockPrivateNetworks` and before
+connecting, and replaces the header in the handshake headers it copies from the client. A counted relay whose upstream
+answers the handshake `508` logs a WARN and relays that `508` and its body, so the client of a WebSocket loop sees the
+innermost hop's reason; any other non-`101`, and any `508` on the unmatched proxy path, still gets the relay's `502`.
+
+### Proxy Authentication
+
+HTTP proxy requests can require Basic authentication. The `HttpRequestHandler` checks the `Proxy-Authorization` header against configured credentials. On failure, it returns 407 with a `Proxy-Authenticate: Basic` header.
+
+## WAR Deployment (Servlet Mode)
+
+`MockServerServlet` and `ProxyServlet` bridge the Servlet API to the same core processing:
+
+```mermaid
+graph LR
+    SR[HttpServletRequest] --> DEC[HttpServletRequestToMockServerHttpRequestDecoder]
+    DEC --> HR[MockServer HttpRequest]
+    HR --> HS[HttpState.handle]
+    HR --> AH[HttpActionHandler.processAction]
+    AH --> RW[ServletResponseWriter]
+    RW --> RESP[HttpServletResponse]
+```
+
+The only difference between the two servlets is a single boolean flag: `ProxyServlet` passes `proxyRequest=true` to `processAction()`, enabling forwarding of unmatched requests.
+
+**WAR limitations**: WebSocket callbacks, dynamic port binding, and server stop are not supported.
+
+**Extension request filters in a WAR.** `processAction` runs the request filter chain (H1) on the extension pool while
+the servlet thread waits for it for at most `extensionDataPlaneTimeoutMillis` (a timeout is a `500`), then matches on
+the servlet thread. `ServletDataPlaneAuthentication` checks data-plane credentials before `processAction`, so a
+refused request (`401`/`426`) never reaches the filters, as on Netty; `InProcessMockServer` does the same with
+`DataPlaneAuthenticationGate` for both `handle` and `handleAsync`. `shutdown()` (from
+`destroy()` or `contextDestroyed`) calls `httpStateHandler.stopDataPlaneHooks()` first: it stops the scheduler and the
+worker group before `httpStateHandler.stop()`, so without that a request whose filter is still running would wait for
+its budget instead of being answered `503` at once.
+
+## Startup Initialisation
+
+`HttpState` performs several initialisation steps in its constructor:
+
+| Step | Condition | Class |
+|------|-----------|-------|
+| File persistence | `configuration.persistExpectations()` | `ExpectationFileSystemPersistence` |
+| Expectation loading | `initializationJsonPath`, `initializationOpenAPIPath`, or `initializationClass` set | `ExpectationInitializerLoader` |
+| JSON file watching | `watchInitializationJson` enabled | `ExpectationFileWatcher` |
+| Memory monitoring | `outputMemoryUsageCsv` enabled | `MemoryMonitoring` |
+
+### Loop Prevention Header
+
+`HttpState` generates the per-instance `MockServer_<UUID>` value of the unmatched path's `x-forwarded-by` header at
+construction; forward actions use a different id: see [Loop Prevention](#loop-prevention).
+
+## CRUD Simulation
+
+The CRUD simulation feature allows auto-generating stateful REST endpoints from a data model definition. Registered via `PUT /mockserver/crud`, it creates 5 endpoints (GET list, GET by ID, POST, PUT, DELETE) backed by an in-memory data store.
+
+### Architecture
+
+CRUD requests are intercepted in `HttpActionHandler.processAction()` **before** normal expectation matching. The dispatch chain is:
+
+1. `CrudDispatcher.dispatch(request)` checks if the request path matches any registered CRUD basePath
+2. If matched, delegates to the appropriate `CrudActionHandler` method based on HTTP method and path structure
+3. If no CRUD match, falls through to normal expectation matching
+
+### List query parameters (pagination / sorting / filtering)
+
+The GET-list endpoint accepts optional query parameters, parsed and applied by `CrudListQuery` in the order **filter → sort → paginate**. When none are supplied the response body is byte-for-byte the legacy full array (and no pagination headers are added).
+
+| Parameter | Meaning |
+|-----------|---------|
+| `filterField` + `filterValue` | keep only items whose `filterField` (dot-separated path, e.g. `address.city`) equals `filterValue` (case-insensitive); both must be supplied together (400 otherwise) |
+| `sortBy` + `sortOrder` | sort by a dot-separated path, case-insensitive; `sortOrder` is `ascending`/`asc` (default) or `descending`/`desc` (400 otherwise); items missing the sort field sort last; stable |
+| `page` + `size` | 0-based `page` (default 0) and page `size` (default: all); `size` ≤ 0 means no limit; a non-integer `page`/`size` or a negative `page` is a 400 |
+
+When any list parameter is active the response adds `X-Total-Count` (total after filtering, before pagination), `X-Page`, and (when `size` is set) `X-Page-Size` headers; the body remains a plain JSON array of the page's items. This is the generic CRUD store's own query surface and is independent of the SCIM list callback's `startIndex`/`count`/`sortBy`/`filter` implementation.
+
+### Key Classes
+
+| Class | Location | Purpose |
+|-------|----------|---------|
+| `CrudExpectationsDefinition` | `mockserver-core/.../model/` | POJO model for the CRUD definition (basePath, idField, idStrategy, initialData) |
+| `CrudDataStore` | `mockserver-core/.../mock/crud/` | Thread-safe in-memory store using ConcurrentHashMap + ConcurrentLinkedDeque |
+| `CrudActionHandler` | `mockserver-core/.../mock/crud/` | Handles CRUD operations, produces HttpResponse objects |
+| `CrudListQuery` | `mockserver-core/.../mock/crud/` | Parses + applies the GET-list pagination / sorting / filtering query params |
+| `CrudDispatcher` | `mockserver-core/.../mock/crud/` | Routes requests to the correct handler based on path and method |
+
+### Thread Safety
+
+`CrudDataStore` uses `ConcurrentHashMap` for data storage and `ConcurrentLinkedDeque` for insertion order tracking. The `AtomicLong` counter handles auto-increment ID generation. All operations are individually thread-safe.
+
+### Reset Behaviour
+
+`CrudDispatcher.reset()` is called during `HttpState.reset()`, clearing all CRUD registrations.
+
+## Binary Mock Processing
+
+When `BinaryRequestProxyingHandler` receives raw bytes on a channel that is in proxy mode (a remote address is set on it), the bytes are relayed on the connection's one upstream connection unless they match a binary expectation (`matchBinaryExpectationsWhenProxying`, default `true` since 9.0.0: see [Binary expectations on a proxied connection](#binary-expectations-on-a-proxied-connection)). Otherwise it looks for a matching expectation via `HttpState.firstMatchingExpectation(BinaryRequestDefinition)`. A matched expectation is post-processed (`HttpState.postProcess`), so one used up by its `Times` is removed at once; until 9.0.0 it stayed listed as active until a later message matched it again. If a match is found with a `BinaryResponse` action, the handler writes the response bytes to the channel, after the response's `delay` if it has one (see [Delayed binary replies](#delayed-binary-replies)); a response with no data, or an empty array, is for a message that has no reply, so nothing is written and the connection stays open (the two mean the same: an empty array is not serialised, so `binaryResponse(new byte[0])` sent by the Java client is stored with null data, while raw JSON with `"binaryData": ""` is stored as an empty array; either is retrieved without `binaryData`). If no match is found, the "unknown message format" text is written and the channel closed. What one read loop delivers is one message: see [One Read Loop Is One Message](netty-pipeline.md#one-read-loop-is-one-message); with `binaryMessageFraming` set to `POSTGRESQL`, `MYSQL`, `REDIS` or `LENGTH_PREFIX` a message is exactly one message of that protocol instead, however it was read, up to `maxRequestBodySize` bytes: see [Named-Protocol Framing](netty-pipeline.md#named-protocol-framing). <!-- version-ref:keep -->
+
+```mermaid
+flowchart TD
+    RAW(["One message: a read loop's bytes\n(BinaryMessageGatherer), or one\nprotocol message (a BinaryMessageFramer)"]) --> PROXY{"Remote address\nconfigured?"}
+    PROXY -->|Yes| FWD["Relay on one upstream\nconnection (BinaryRelay)\n(matched first with\nmatchBinaryExpectationsWhenProxying)"]
+    PROXY -->|No| BRD["Create BinaryRequestDefinition\nfrom byte content"]
+    BRD --> MATCH["HttpState.firstMatchingExpectation()"]
+    MATCH -->|Match with BinaryResponse| DATA{"binaryData\nnull or empty?"}
+    DATA -->|No| WRITE["Write binaryData to channel\nafter its delay and any\nearlier delayed reply"]
+    DATA -->|Yes| NOTHING["Write nothing,\nkeep the connection open"]
+    MATCH -->|No match| CLOSE["Write 'unknown message format'\nafter any delayed reply,\nclose channel"]
+```
+
+**Forwarding uses one upstream connection per client connection.** The connection's first message opens one upstream connection that is kept for the connection's life (`BinaryRelay`, connected by `NettyHttpClient.connectBinaryRelay`), every message is written to it, and whatever the upstream sends is written back as it arrives; a client that turns TLS on part way through (PostgreSQL's `SSLRequest`) has that upstream connection upgraded to TLS too, and a client that is TLS from its first byte gets an upstream connection that is TLS from its first byte. The upstream connection is made directly, or tunnelled through `forwardSocksProxy` (SOCKS5) or through `forwardHttpsProxy` or `forwardHttpProxy` (`CONNECT`, with `forwardProxyAuthenticationUsername` and `forwardProxyAuthenticationPassword` sent as `Proxy-Authorization`) when the target goes through one (`noProxyHosts` applies). 8.0.0 forwarded each message on an upstream connection of its own, with `forwardBinaryRequestsWithoutWaitingForResponse` choosing whether to wait for each response; 9.0.0 removed that forwarder and the setting, and a leftover value logs one WARN at start-up and is ignored. See [netty-pipeline.md](netty-pipeline.md#one-upstream-connection-for-a-binary-connection) for the relay's backpressure and close rules. <!-- version-ref:keep -->
+
+**A binary message's log entries show at most its first `maxLoggedBodyBytes` bytes (default 0: every byte).** Each entry that quotes a message or an upstream's response (the received record, "no matching binary expectation", "unknown message format" with its hex and its UTF-8 text, the mocked and forwarded response entries, and `BinaryRelay`'s entries) shows the first `maxLoggedBodyBytes` bytes followed by `...(<length> bytes, only the first <n> logged, maxLoggedBodyBytes)`, as a body cut by the same setting keeps its first bytes and records its whole length. The cut is made as the entry is built (`StringFormatter.hexDumpForLog`, `formatBytes(byte[], int)`, `utf8ForLog`), so the whole dump is never made. The `binaryProxyListener` is not a log and still gets every byte.
+
+**A failed connect is logged once.** `BinaryRelay` writes the one entry, with the latest message's correlation id, as it closes the client connection: a target it may not connect to (`forwardProxyBlockPrivateNetworks`) as a refusal, and any other failure, a refused `CONNECT` included, as "unable to connect to", at INFO for a `CONNECT` answer over `maxHeaderSize` (the refusal itself is the WARN) and at WARN otherwise. A failure of the upstream connection (`ExceptionHandling.upstreamConnectionFailure`: an `IOException`, `SocketConnectionException`, `SocketCommunicationException` or `TimeoutException` among its causes) is named without a stack trace, as an HTTP forward's is; any other failure keeps its bounded stack trace.
+
+### Delayed binary replies
+
+**A `BinaryResponse`'s `delay` holds its reply back, and every later reply MockServer writes on the same connection waits behind it.** `BinaryLocalReplies` (one per connection, a channel attribute, used only on the connection's event loop) writes a reply at once when nothing waits and it has no delay; otherwise it queues it with a due time of the message's handling plus the sampled delay (`Delay.sampleValueMillis()`, so distributions apply) and writes each queued reply once it is due and every reply before it has been written, on an event-loop timer (`ctx.executor().schedule`). Nothing blocks a thread.
+
+| Concern | Rule |
+|---------|------|
+| Order | Replies are written in the order of the messages they answer: a shorter delay, or none, waits behind an earlier longer one. Each delay counts from its own message, not from the reply before it |
+| No match | The "unknown message format" text is queued too, and the connection closes after it is written; messages read while it waits are not answered (`BinaryLocalReplies.closing`) |
+| Close | `channelInactive` and `handlerRemoved` call `BinaryLocalReplies.discard`, which cancels the timer and drops what waits; buffers are made only at the write, so nothing is left to release |
+| Backpressure | More than `MAX_WAITING_REPLIES` (64) waiting, or the client connection not being writable, stops reads (one `ChannelReadPause` hold, `pauseOrResumeReads`), released once nothing waits and the connection is writable, or on discard |
+| Client not reading its replies | A reply written at once that leaves the connection not writable (past its 32 KiB high water mark) takes the hold, creating the per-connection state only then, so a client that reads its replies costs one `isWritable()` per reply. `channelWritabilityChanged` re-checks the hold, acting on what `isWritable()` says when it runs. Once the client is not read, only messages already read bring replies, so what MockServer holds for it is the water mark plus those replies, whatever the client sends. A relayed connection is left to `BinaryRelay`, which takes its own `CLIENT_NOT_WRITABLE` hold after a local reply (`BinaryRelay.hasRelay`). Tests: `BinaryRequestProxyingHandlerDelayTest` (embedded channel) and `BinaryMockClientNotReadingIntegrationTest` (a real MockServer, a client that sends small messages each answered by a 2,000-byte reply and reads none) |
+| Expectation state | Post-processed when the message is matched, before the delay, as without one |
+| No data | Nothing to write, so nothing to delay or order |
+| Relayed connection | The reply is delayed the same way; `BinaryRelay.answeredLocally` runs after the write. Upstream responses are not held behind a delayed reply, except behind a `FORWARD_AND_REPLACE` replacement, which the relay writes in the upstream's order |
+
+### Binary expectations on a proxied connection
+
+With `matchBinaryExpectationsWhenProxying` (default `true` since 9.0.0; `false` turns matching off), a message on a proxied connection is matched first, in `BinaryRequestProxyingHandler.relayedMessageExpectation`, after `BinaryRelay.prepare` has made the connection's relay without connecting it, and acted on in `answeredByExpectation`. A match with a `BinaryResponse` is answered by the same `replyFromExpectation` used without a target, and the message is **not forwarded**; anything else is relayed (`BinaryRelay.forward`). A message runs the matcher pass only when `HttpState.mayMatchBinaryMessage(bytes)` says an expectation may match it (`BinaryExpectationIndex`, kept by expectation id off the expectation store's mutation listener like the `respondBeforeBody` set). Only a `BinaryRequestDefinition` matches a binary message, and only one with equal bytes, unless it has no bytes or is negated; a `ConditionalRequestDefinition` may match any message (an HTTP guard that fails with no `else` matches), and so may an `AnyOfRequestDefinition` (a negated one matches every message). So the gate is: no binary expectation, false; any negated or byte-less binary expectation, or any conditional or anyOf one, true; otherwise true only when a binary expectation of the message's length has its bytes (a lookup by length, then a byte compare per expectation of that length). It errs towards true, so a stale entry costs a pass, never a match. With no binary expectation registered, or none of the message's length, the cost is one lookup. The relay's own rules for answered messages (no listener call, the ordering WARN, the client-not-writable hold) are in [netty-pipeline.md](netty-pipeline.md#binary-expectations-on-a-relayed-connection). <!-- version-ref:keep -->
+
+| Case | Result |
+|------|--------|
+| Setting off | Expectations not consulted, as in 8.0.0 <!-- version-ref:keep --> |
+| Matched, `BinaryResponse` with data (`upstream` absent or `ANSWER_ONLY`) | Written to the client; event log as without a target (`FORWARDED_REQUEST`, "returning binary mock response") |
+| Matched, `BinaryResponse` without data (`ANSWER_ONLY`) | Nothing written, nothing forwarded |
+| Matched, `upstream` `ANSWER_AND_FORWARD`, reply tracked | Answered as `ANSWER_ONLY`, then forwarded with `UpstreamReply.drop()`: the upstream's reply is dropped |
+| Matched, `upstream` `FORWARD_AND_REPLACE`, reply tracked | Post-processed, logged ("to write binary mock response ... in place of its response"), forwarded with `UpstreamReply.replaceWith(data, sampled delay)`; nothing is written until the upstream's reply has ended |
+| Matched, `ANSWER_AND_FORWARD` or `FORWARD_AND_REPLACE`, reply not tracked (`BinaryRelay.tracksReplies` false: RAW framing, or tracking given up) | Answered as `ANSWER_ONLY`; one WARN per connection |
+| Matched, any other action | Post-processed, then forwarded, with a WARN |
+| Not matched | Forwarded. A message the gate rules out gets no matcher pass, so no `EXPECTATION_NOT_MATCHED` entries; one it lets through (bytes equal to an expectation's that did not match, for example used up or in another scenario state, or while a match-anything expectation exists) gets the pass's usual entries |
+
+`BinaryResponse.upstream` picks what happens upstream. The two modes that forward need to know where the upstream's reply to one message ends, which only a protocol's framing tells: with `binaryMessageFraming=POSTGRESQL` the relay follows the backend messages (`PostgresqlReplies`, [netty-pipeline.md](netty-pipeline.md#dropped-and-replaced-upstream-replies)). Without a target (plain mocking) the field is ignored and a match is `ANSWER_ONLY`.
+
+## DNS Mock Processing
+
+DNS queries arrive via UDP on a separate `DatagramChannel` bound by `MockServer.bindDnsPort()`. The `DnsRequestHandler` decodes the query, creates a `DnsRequestDefinition`, and matches it against expectations.
+
+```mermaid
+flowchart TD
+    UDP([UDP DNS query]) --> DECODE["DatagramDnsQueryDecoder\n→ DatagramDnsQuery"]
+    DECODE --> EXTRACT["Extract name, type, class\n→ DnsRequestDefinition"]
+    EXTRACT --> MATCH["HttpState.firstMatchingExpectation()"]
+    MATCH -->|Match with DnsResponse| ENCODE["Encode DnsRecords\nto DatagramDnsResponse"]
+    MATCH -->|No match| NXDOMAIN["Return NXDOMAIN"]
+    ENCODE --> SEND["ctx.writeAndFlush(response)"]
+    NXDOMAIN --> SEND
+```
+
+Supported DNS record types: A, AAAA, CNAME, MX, SRV, TXT, PTR. The DNS server is disabled by default (`dnsEnabled=false`) and must be explicitly enabled.
+
+## OpenAPI Callback Support
+
+When expectations are generated from an OpenAPI specification (via `PUT /mockserver/openapi` or `initializationOpenAPIPath`), MockServer now automatically processes `callbacks` defined on operations.
+
+For each callback in the OpenAPI spec, `OpenAPIConverter.buildAfterActions()`:
+1. Extracts the callback URL expression (e.g., `{$request.body#/callbackUrl}`)
+2. Resolves the HTTP method from the callback operation
+3. Extracts the request body schema and generates an example body
+4. Creates an `AfterAction` with a `HttpForward`-style webhook that fires after the main response
+
+Runtime expressions in callback URLs (e.g., `{$request.body#/callbackUrl}`) are preserved verbatim at spec-conversion time and resolved at callback fire-time by `OpenApiRuntimeExpressionResolver.resolve()`. The resolver is called in `HttpActionHandler.dispatchAfterAction()` and supports:
+
+- `{$request.body#/<json-pointer>}` — JSON Pointer into the triggering request body (via Jackson `JsonNode.at()`)
+- `{$request.query.<name>}` — query parameter value from the triggering request
+- `{$request.header.<name>}` — header value from the triggering request
+- `{$request.path.<name>}` — path parameter (best-effort; requires path parameters to be populated)
+- `{$request.method}` — HTTP method of the triggering request
+- `{$url}` — reconstructed URL of the triggering request
+
+Unresolvable expressions (unknown format, missing values) are replaced with empty string. Response-based expressions (`{$response.body#/...}`, `{$response.header.*}`) are out of scope because the response object is not available at after-action dispatch time — these are also replaced with empty string.
+
+The resolver guarantees a **strict no-op** when the after-action request contains no `{$...}` expressions: the original instance is returned without cloning or allocation. This ensures zero overhead for the vast majority of after-actions (plain webhooks).
+
+Static callback URLs are used as-is (parsed into path + Host header at conversion time).
+
+Remaining limitations:
+- Only `post`, `put`, `patch`, `get`, and `delete` callback methods are supported
+- Callback request bodies use the first available media type schema
+- Response-based expressions are not resolved (response not available at dispatch time)
+
+## Incremental OpenAPI Sync
+
+The `PUT /mockserver/openapi` endpoint performs **idempotent, incremental synchronization** when re-importing an OpenAPI specification. Each generated expectation receives a stable, deterministic id of the form `openapi:<specKey>:<operationId>` (with `:<n>` appended only to disambiguate multiple expectations for the same operation, e.g. different response codes).
+
+The `specKey` is derived from the parsed `info.title` field of the OpenAPI spec (lowercased, non-alphanumeric characters replaced with `_`). If the title is blank, a short hex hash of the raw spec payload/URL is used instead.
+
+When the endpoint processes an import:
+
+1. `OpenAPIConverter.buildExpectations()` generates expectations with stable ids
+2. `HttpState.add(OpenAPIExpectation)` identifies the namespace prefixes (e.g. `openapi:swagger_petstore:`) covered by the new expectations
+3. Existing expectations whose id starts with a covered prefix but is **not** in the new id set are **pruned** (removed)
+4. The new expectations are upserted (added or updated in place by id)
+
+This means:
+- **Re-importing the same spec** is a no-op (same ids, same content)
+- **Adding an operation** to the spec creates a new expectation without affecting existing ones
+- **Removing an operation** from the spec prunes the corresponding expectation
+- **Other specs and manually created expectations** are never affected (different namespace or no `openapi:` prefix)
+
+The prune logic is encapsulated in `OpenApiSyncPlanner.idsToPrune()` for testability.
+
+## Detailed Verification Failures (Diff Mode)
+
+When `mockserver.detailedVerificationFailures` is enabled (default: `true`), verification failure messages include a "closest match diff" section showing exactly which fields of the closest matching request differed from the expected request.
+
+### How It Works
+
+In `MockServerEventLog.verify()`, after determining verification failed:
+1. Creates an `HttpRequestPropertiesMatcher` for the verification request definition
+2. Tests each received request against it with `detailedMatchFailures=true`
+3. Identifies the closest match (fewest diff fields)
+4. Appends formatted diff using `MatchDifferenceFormatter`
+5. Appends a `verification summary:` block after the diff: for a request or response count, expected vs matched count, the three closest non-matching requests or responses with every differing field, and how many arrived after the verification started; for a sequence, which step failed, the closest misses for that step and any earlier matches that came out of order (see [event-system.md](event-system.md#verification-summary-on-failure))
+
+### 404 Closest Match Logging
+
+When no expectation matches and a 404 is returned, `HttpActionHandler.returnNotFound()` calls `HttpState.findClosestMatchDiff()` to find the closest matching expectation's diff details and logs them at DEBUG level. By default the 404 response body is not modified to avoid breaking client assertions.
+
+### Client-Visible Match Feedback (Opt-In)
+
+When `attachMismatchDiagnosticToResponse` is enabled (default: `false`), unmatched 404 responses include diagnostic information to help test authors understand why their mock didn't match:
+
+- **Header** `x-mockserver-closest-match`: lists the fields that differed (e.g., `fields differ: method, path`) or `no expectations configured` when no expectations exist.
+- **Body**: a JSON object with `matchedFieldCount`, `totalFieldCount`, and a `differences` map keyed by field name, each containing an array of diff descriptions.
+
+This reuses the existing `findClosestMatchDiff()` and `MatchDifferenceFormatter` infrastructure -- no new matcher logic is introduced. The diagnostic is only attached when the property is explicitly set to `true`; when off (the default), the response is byte-for-byte identical to previous behaviour.
+
+### Key Classes
+
+| Class | Location | Purpose |
+|-------|----------|---------|
+| `MatchDifferenceFormatter` | `mockserver-core/.../matchers/` | Formats `MatchDifference` maps into human-readable text |
+| `MatchDifference` | `mockserver-core/.../matchers/` | Stores per-field match failure details (pre-existing) |
+| `MatchFailureHints` | `mockserver-core/.../matchers/` | Generates actionable suggestions for common mismatches (pre-existing) |
+| `MismatchRemediation` | `mockserver-core/.../matchers/` | Produces one-line remediation hints from `MatchDifference.Field` and diff messages (e.g., "use method POST not GET", "add trailing slash") |

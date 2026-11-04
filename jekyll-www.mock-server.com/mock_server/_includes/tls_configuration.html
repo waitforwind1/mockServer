@@ -1,0 +1,492 @@
+<a id="tls_configuration" class="anchor" href="#tls_configuration">&nbsp;</a>
+
+<h2>TLS Configuration:</h2>
+
+<p>The following diagram shows where TLS/mTLS configuration settings are used:</p>
+
+<p style="width: 100%; padding-top: 25px; padding-bottom: 25px;"><img src="../images/https_tls_configuration.png" alt="MockServer HTTPS & TLS" style="max-width:100%;"></p>
+
+<a id="tls_configuration_inbound_tls" class="anchor" href="#tls_configuration_inbound_tls">&nbsp;</a>
+
+<h3>Inbound TLS (for Received Requests)</h3>
+
+<h4>Dynamic Inbound Certificate Authority X.509 & Private Key</h4>
+
+<button id="button_configuration_dynamically_create_ca_certificate" class="accordion title"><strong>Dynamically Create Inbound Certificate Authority X.509</strong></button>
+<div class="panel title">
+    <p>Enable dynamic creation of Certificate Authority X.509 Certificate and Private Key</p>
+    <p>Enable this property to increase the security of trusting the MockServer Certificate Authority X.509 by ensuring a local dynamic value is used instead of the public value in the MockServer git repo.</p>
+    <p>These PEM files will be created and saved in the directory specified with configuration property <a href="#button_configuration_directory_to_save_dynamic_ssl_certificates">directoryToSaveDynamicSSLCertificate.</a></p>
+    <p>A Certificate Authority X.509 Certificate and Private Key will only be created if the files used to save them are not already present.  Therefore, if MockServer is re-started multiple times with the same value for <a href="#button_configuration_directory_to_save_dynamic_ssl_certificates">directoryToSaveDynamicSSLCertificate.</a> the Certificate Authority X.509 Certificate and Private Key will only be created once.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.dynamicallyCreateCertificateAuthorityCertificate(boolean enable)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.dynamicallyCreateCertificateAuthorityCertificate=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_DYNAMICALLY_CREATE_CERTIFICATE_AUTHORITY_CERTIFICATE=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.dynamicallyCreateCertificateAuthorityCertificate=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.dynamicallyCreateCertificateAuthorityCertificate="true"</code></pre>
+</div>
+
+<button id="button_configuration_directory_to_save_dynamic_ssl_certificates" class="accordion title"><strong>Directory To Save Dynamic Inbound Certificate Authority X.509 and Private Key</strong></button>
+<div class="panel title">
+    <p>Directory used to save the dynamically generated Certificate Authority X.509 Certificate and Private Key.</p>
+    <p>This directory will only be used if MockServer is configured to create a dynamic Certificate Authority X.509 certificate and private key using <a href="#button_configuration_dynamically_create_ca_certificate">dynamicallyCreateCertificateAuthorityCertificate</a>.</p>
+    <p>By default the certificate and private key are written to the current working directory (<span class="this_value">.</span>) of the MockServer process.</p>
+    <p>This setting is startup-only: set it before MockServer starts (system property, environment variable, property file or <span class="inline_code">Configuration</span>). A <span class="inline_code">PUT /mockserver/configuration</span> request cannot change it (a different value is ignored and a warning is logged), so a caller of the control plane cannot redirect where MockServer writes files.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">.</span> (current working directory)</p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.directoryToSaveDynamicSSLCertificate(String directoryToSaveDynamicSSLCertificate)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.directoryToSaveDynamicSSLCertificate=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_CERTIFICATE_DIRECTORY_TO_SAVE_DYNAMIC_SSL_CERTIFICATE=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.directoryToSaveDynamicSSLCertificate=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.directoryToSaveDynamicSSLCertificate="/some/existing/path"</code></pre>
+</div>
+
+<button id="button_configuration_proactively_initialise_tls" class="accordion title"><strong>Proactively Initialise TLS During Start Up</strong></button>
+<div class="panel title">
+    <p>Proactively initialise TLS during start to ensure that if <a href="#button_configuration_dynamically_create_ca_certificate">dynamicallyCreateCertificateAuthorityCertificate</a> is enabled the Certificate Authority X.509 Certificate and Private Key will be created during start up and not when the first TLS connection is received.</p>
+    <p>This setting will also ensure any configured private key and X.509 will be loaded during start up and not when the first TLS connection is received to give immediate feedback on any related TLS configuration errors.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.proactivelyInitialiseTLS(boolean enable)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.proactivelyInitialiseTLS=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_PROACTIVELY_INITIALISE_TLS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.proactivelyInitialiseTLS=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.proactivelyInitialiseTLS="true"</code></pre>
+</div>
+
+<h4>TLS Protocol Versions</h4>
+
+<button id="button_configuration_tls_protocols" class="accordion title"><strong>TLS Protocol Versions</strong></button>
+<div class="panel title">
+    <p>Comma separated list of TLS protocol versions to enable for both inbound and outbound TLS connections.</p>
+    <p>The default value is <span class="this_value">TLSv1.2,TLSv1.3</span>. TLSv1 and TLSv1.1 are deprecated by RFC 8996 (they are vulnerable to the BEAST and POODLE attacks) and are <strong>no longer enabled by default</strong>, and TLSv1.3 is now enabled by default.</p>
+    <p><strong>Breaking change:</strong> a client that can only negotiate TLSv1 or TLSv1.1 will no longer be able to complete a handshake with MockServer. If you genuinely need the legacy protocols for an old client, set <span class="inline_code">tlsProtocols</span> back to <span class="inline_code">TLSv1,TLSv1.1,TLSv1.2</span> <strong>and</strong> set <a href="#button_configuration_tls_allow_insecure_protocols">tlsAllowInsecureProtocols</a> to <span class="inline_code">true</span> — both are required, because the insecure-protocol filter strips TLSv1/TLSv1.1 unless they are explicitly allowed.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">TLSv1.2,TLSv1.3</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.tlsProtocols("TLSv1.2,TLSv1.3")</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsProtocols=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_TLS_PROTOCOLS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.tlsProtocols=...</code></pre>
+    <p>Example (enable TLS 1.2 and 1.3 only):</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsProtocols="TLSv1.2,TLSv1.3"</code></pre>
+    <p>Example (Docker environment variable):</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_TLS_PROTOCOLS="TLSv1.2,TLSv1.3"</code></pre>
+</div>
+
+<button id="button_configuration_tls_allow_insecure_protocols" class="accordion title"><strong>Allow Insecure TLS Protocols</strong></button>
+<div class="panel title">
+    <p>Whether to honour deprecated <span class="inline_code">TLSv1</span> / <span class="inline_code">TLSv1.1</span> entries that appear in <a href="#button_configuration_tls_protocols">tlsProtocols</a>.</p>
+    <p>The default has been <span class="this_value">false</span> since 8.0.0: any <span class="inline_code">TLSv1</span> or <span class="inline_code">TLSv1.1</span> entries in <span class="inline_code">tlsProtocols</span> are filtered out before the SSL context is built, and the <span class="inline_code">tlsProtocols</span> default is <span class="inline_code">TLSv1.2,TLSv1.3</span>. Set this to <span class="inline_code">true</span> only if a legacy client genuinely cannot negotiate TLSv1.2/TLSv1.3, together with adding the protocols back to <span class="inline_code">tlsProtocols</span>.</p> <!-- version-ref:keep -->
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.tlsAllowInsecureProtocols(boolean allow)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsAllowInsecureProtocols=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_TLS_ALLOW_INSECURE_PROTOCOLS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.tlsAllowInsecureProtocols=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsAllowInsecureProtocols="true"</code></pre>
+</div>
+
+<h4>Dynamic Inbound Private Key & X.509</h4>
+
+<button id="button_configuration_prevent_dynamic_tls_update" class="accordion title"><strong>Prevent Dynamic Inbound X.509 Update</strong></button>
+<div class="panel title">
+    <p>MockServer dynamically updates the Subject Alternative Name (SAN) values for its TLS certificate to add domain names and IP addresses from request Host headers and Host headers in expectations, this configuration setting disables this automatic update and only uses SAN value provided in <strong>TLS Subject Alternative Name Domains</strong> and <strong>TLS Subject Alternative Name IPs</strong> configuration properties.</p>
+    <p>When this property is enabled the generated X.509 Certificate and Private Key pair are saved to the <a href="#button_configuration_directory_to_save_dynamic_ssl_certificates">directoryToSaveDynamicSSLCertificate</a> as <strong>Certificate.pem</strong> and <strong>PKCS8PrivateKey.pem</strong></p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.preventCertificateDynamicUpdate(boolean prevent)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.preventCertificateDynamicUpdate=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_PREVENT_CERTIFICATE_DYNAMIC_UPDATE=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.preventCertificateDynamicUpdate=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.preventCertificateDynamicUpdate="true"</code></pre>
+</div>
+
+<button id="button_configuration_ssl_certificate_domain_name" class="accordion title"><strong>Inbound X.509 Domain Name</strong></button>
+<div class="panel title">
+    <p>The Common Name (CN) MockServer puts on the auto-generated, dynamically-created inbound TLS certificate it presents to clients. It is also added as the first Subject Alternative Name (SAN) entry alongside any set via <a href="#button_configuration_ssl_subject_alternative_name_domains">sslSubjectAlternativeNameDomains</a>. Change it if your clients connect using a hostname other than <span class="inline_code">localhost</span> (for example a Docker Compose service name or an internal DNS name) and you want that name on the certificate without relying solely on dynamic SAN discovery.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">localhost</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.sslCertificateDomainName(String domainName)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.sslCertificateDomainName=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_SSL_CERTIFICATE_DOMAIN_NAME=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.sslCertificateDomainName=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.sslCertificateDomainName="localhost"</code></pre>
+</div>
+
+<button id="button_configuration_ssl_subject_alternative_name_domains" class="accordion title"><strong>Inbound X.509 Subject Alternative Name Domains</strong></button>
+<div class="panel title">
+    <p>The Subject Alternative Name (SAN) domain names for auto-generate TLS certificates as a comma separated list</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">localhost</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.sslSubjectAlternativeNameDomains(Set&lt;String&gt; sslSubjectAlternativeNameDomains)</code></pre>
+    <p>On a <span class="inline_code">Configuration</span> instance (per-server, e.g. via <span class="inline_code">ClientAndServer.startClientAndServer(Configuration)</span>), add or clear domains incrementally instead of replacing the whole set:</p>
+    <pre class="prettyprint lang-java code"><code class="code">configuration.addSslSubjectAlternativeNameDomains(String... additionalSubjectAlternativeNameDomains)</code></pre>
+    or
+    <pre class="code" style="padding: 2px;"><code class="code">configuration.clearSslSubjectAlternativeNameDomains()</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.sslSubjectAlternativeNameDomains=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_SSL_SUBJECT_ALTERNATIVE_NAME_DOMAINS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.sslSubjectAlternativeNameDomains=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.sslSubjectAlternativeNameDomains="localhost,www.foo.bar"</code></pre>
+</div>
+
+<button id="button_configuration_ssl_subject_alternative_name_ips" class="accordion title"><strong>Inbound X.509 Subject Alternative Name IPs</strong></button>
+<div class="panel title">
+    <p>The Subject Alternative Name (SAN) IP addresses for auto-generate TLS certificates as a comma separated list</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">127.0.0.1,0.0.0.0</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.sslSubjectAlternativeNameIps(Set&lt;String&gt; sslSubjectAlternativeNameIps)</code></pre>
+    <p>On a <span class="inline_code">Configuration</span> instance (per-server, e.g. via <span class="inline_code">ClientAndServer.startClientAndServer(Configuration)</span>), add or clear IPs incrementally instead of replacing the whole set:</p>
+    <pre class="prettyprint lang-java code"><code class="code">configuration.addSslSubjectAlternativeNameIps(String... additionalSubjectAlternativeNameIps)</code></pre>
+    or
+    <pre class="code" style="padding: 2px;"><code class="code">configuration.clearSslSubjectAlternativeNameIps()</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.sslSubjectAlternativeNameIps=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_SSL_SUBJECT_ALTERNATIVE_NAME_IPS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.sslSubjectAlternativeNameIps=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.sslSubjectAlternativeNameIps="127.0.0.1,0.0.0.0"</code></pre>
+</div>
+
+<button id="button_configuration_max_subject_alternative_names" class="accordion title"><strong>Maximum Dynamic Subject Alternative Names</strong></button>
+<div class="panel title">
+    <p>The maximum number of dynamically-discovered Subject Alternative Names (SANs) the auto-generated server certificate will accumulate. MockServer adds a SAN for each new hostname it observes via SNI or the <span class="inline_code">Host</span> header and regenerates the leaf certificate each time. Without a cap, a client sending many distinct hostnames could grow the SAN list without bound, causing unbounded memory and CPU use and eventually producing a certificate too large to complete a TLS handshake.</p>
+    <p>When the cap is reached, the oldest dynamically-discovered entry is evicted and a warning is logged. Explicitly configured names — including the default <span class="this_value">localhost</span> and any names set via <a href="#button_configuration_ssl_subject_alternative_name_domains">sslSubjectAlternativeNameDomains</a> or <a href="#button_configuration_ssl_subject_alternative_name_ips">sslSubjectAlternativeNameIps</a> — are never evicted.</p>
+    <p>Raise this value if you are proxying more than 100 distinct hostnames in a single MockServer instance and are seeing eviction warnings or intermittent certificate name-mismatch errors for hosts used earlier in a long-running session.</p>
+    <p>Type: <span class="keyword">integer</span> Default: <span class="this_value">100</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.maxSubjectAlternativeNames(int maxSubjectAlternativeNames)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxSubjectAlternativeNames=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_MAX_SUBJECT_ALTERNATIVE_NAMES=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.maxSubjectAlternativeNames=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.maxSubjectAlternativeNames=200</code></pre>
+</div>
+
+<button id="button_configuration_ssl_certificate_leaf_validity_in_days" class="accordion title"><strong>Inbound X.509 Certificate Validity (Days)</strong></button>
+<div class="panel title">
+    <p>Number of days the auto-generated server (leaf) TLS certificate is valid for. The default of <span class="this_value">397</span> keeps the certificate inside Apple's 825-day maximum for TLS server certificates (iOS 13 / macOS 10.15); the previous 10-year certificate exceeded this limit and can cause TLS handshakes to fail on Apple platforms. MockServer automatically regenerates the certificate well before it expires, so a long-running server never serves an expired certificate.</p>
+    <p>Raise this (for example to <span class="inline_code">3650</span>) only if you depend on the previous long-lived certificate. A non-positive value falls back to the default. The dynamically generated Certificate Authority is unaffected and keeps its long (10 year) life.</p>
+    <p>Type: <span class="keyword">integer</span> Default: <span class="this_value">397</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.sslCertificateLeafValidityInDays(int sslCertificateLeafValidityInDays)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.sslCertificateLeafValidityInDays=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_SSL_CERTIFICATE_LEAF_VALIDITY_IN_DAYS=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.sslCertificateLeafValidityInDays=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.sslCertificateLeafValidityInDays=3650</code></pre>
+</div>
+
+<h4>Fixed (i.e. Custom) Inbound Certificate Authority X.509 & Private Key</h4>
+
+<button id="button_configuration_tls_certificate_authority_private_key" class="accordion title"><strong>Fixed Inbound Certificate Authority Private Key</strong></button>
+<div class="panel title">
+    <p>Location of custom file for Certificate Authority for TLS, the private key must be a PKCS#8 or PKCS#1 PEM file and must match the <strong>TLS Certificate Authority X.509 Certificate</strong>.</p>
+    <p>To convert a PKCS#1 PEM file (i.e. default for Bouncy Castle) to a PKCS#8 PEM file the following command can be used: <code class="code">openssl pkcs8 -topk8 -inform PEM -in private_key_PKCS_1.pem -out private_key_PKCS_8.pem -nocrypt</code></p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">the built-in MockServer CA private key (<code class="code">org/mockserver/socket/PKCS8CertificateAuthorityPrivateKey.pem</code> on the classpath)</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.certificateAuthorityPrivateKey(String certificateAuthorityPrivateKey)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.certificateAuthorityPrivateKey=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_CERTIFICATE_AUTHORITY_PRIVATE_KEY=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.certificateAuthorityPrivateKey=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.certificateAuthorityPrivateKey="/some/existing/path"</code></pre>
+</div>
+
+<button id="button_configuration_tls_certificate_authority_certificate" class="accordion title"><strong>Fixed Inbound Certificate Authority X.509 Certificate Chain</strong></button>
+<div class="panel title">
+    <p>Location of custom file for Certificate Authority for TLS, the certificate must be a X.509 PEM file and must match the <strong>TLS Certificate Authority Private Key</strong>.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">the built-in MockServer CA certificate (<code class="code">org/mockserver/socket/CertificateAuthorityCertificate.pem</code> on the classpath)</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.certificateAuthorityCertificate(String certificateAuthorityCertificate)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.certificateAuthorityCertificate=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_CERTIFICATE_AUTHORITY_X509_CERTIFICATE=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.certificateAuthorityCertificate=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.certificateAuthorityCertificate="/some/existing/path"</code></pre>
+</div>
+
+<h4>Fixed (i.e. Custom) Inbound Private Key & X.509</h4>
+
+<button id="button_configuration_tls_private_key" class="accordion title"><strong>Fixed Inbound Private Key</strong></button>
+<div class="panel title">
+    <p>File system path or classpath location of a fixed custom private key for TLS connections into MockServer.</p>
+    <p>The private key must be a PKCS#8 or PKCS#1 PEM file and must be the private key corresponding to the <a href="#button_configuration_tls_X509_certificate">x509CertificatePath</a> X.509 (public key) configuration.</p>
+    <p>The <a href="#button_configuration_tls_certificate_authority_certificate">certificateAuthorityCertificate</a> configuration must be the Certificate Authority for the corresponding X.509 certificate (i.e. able to valid its signature), see: <a href="#button_configuration_tls_X509_certificate">x509CertificatePath</a>.</p>
+    <p>To convert a PKCS#1 (i.e. default for Bouncy Castle) to a PKCS#8 the following command can be used: openssl pkcs8 -topk8 -inform PEM -in private_key_PKCS_1.pem -out private_key_PKCS_8.pem -nocrypt</p>
+    <p>This configuration will be ignored unless x509CertificatePath is also set.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">null</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.privateKeyPath(String privateKeyPath)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.privateKeyPath=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_TLS_PRIVATE_KEY_PATH=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.privateKeyPath=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.privateKeyPath="/some/existing/path"</code></pre>
+</div>
+
+<button id="button_configuration_tls_X509_certificate" class="accordion title"><strong>Fixed Inbound X.509 Certificate Chain</strong></button>
+<div class="panel title">
+    <p>File system path or classpath location of a fixed custom X.509 Certificate for TLS connections into MockServer</p>
+    <p>The certificate must be a X.509 PEM file and must be the public key corresponding to the <a href="#button_configuration_tls_private_key">privateKeyPath</a> private key configuration.</p>
+    <p>The <a href="#button_configuration_tls_certificate_authority_certificate">certificateAuthorityCertificate</a> configuration must be the Certificate Authority for this certificate (i.e. able to valid its signature).</p>
+    <p>This configuration will be ignored unless privateKeyPath is also set.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">null</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.x509CertificatePath(String x509CertificatePath)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.x509CertificatePath=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_TLS_X509_CERTIFICATE_PATH=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.x509CertificatePath=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.x509CertificatePath="/some/existing/path"</code></pre>
+</div>
+
+<h4>Inbound mTLS Client Authentication (for Received Requests)</h4>
+
+<button id="button_configuration_require_mtls_for_all_tls_connections" class="accordion title"><strong>Require Inbound mTLS Client Authentication</strong></button>
+<div class="panel title">
+    <p>Require mTLS (also called client authentication and two-way TLS) for all TLS connections / HTTPS requests to MockServer</p>
+    <p>Client certificates must be signed by a CA in <a href="#button_configuration_mtls_certificate_chain">tlsMutualAuthenticationCertificateChain</a> or by MockServer's own CA, but never by the default CA bundled with MockServer, whose private key is published. MockServer refuses to start if mTLS would trust only the bundled CA; see <a href="#button_configuration_mtls_allow_bundled_ca">tlsMutualAuthenticationAllowBundledCa</a> for the fixes.</p>
+    <p>In a WAR deployment the servlet container terminates TLS and verifies the client certificate against its own trust store, and MockServer requires a verified client certificate on every mocked request; see <a href="/mock_server/configuration_properties.html#data_plane_authentication_configuration">Data Plane Authentication Configuration</a>.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.tlsMutualAuthenticationRequired(boolean enable)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsMutualAuthenticationRequired=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_TLS_MUTUAL_AUTHENTICATION_REQUIRED=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.tlsMutualAuthenticationRequired=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsMutualAuthenticationRequired="true"</code></pre>
+</div>
+
+<button id="button_configuration_mtls_certificate_chain" class="accordion title"><strong>Fixed Inbound mTLS Client Authentication X.509 Certificate Chain (for Trusting Client X.509 Certificates)</strong></button>
+<div class="panel title">
+    <p>File system path or classpath location of custom mTLS (TLS client authentication) X.509 Certificate Chain for Trusting (i.e. signature verification of) Client X.509 Certificates, the certificate chain must be a X.509 PEM file.</p>
+    <p>This certificate chain will be used if MockServer performs mTLS (client authentication) for inbound TLS connections because <a href="#button_configuration_require_mtls_for_all_tls_connections">tlsMutualAuthenticationRequired</a> is enabled</p>
+    <p>This configuration property is also used for MockServerClient to trust <a href="#button_configuration_mtls_mockserver_client_certificate_chain">outbound TLS X.509 certificates</a> i.e. TLS connections to MockServer</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">null</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.tlsMutualAuthenticationCertificateChain(String certificateChain)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsMutualAuthenticationCertificateChain=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_TLS_MUTUAL_AUTHENTICATION_CERTIFICATE_CHAIN=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.tlsMutualAuthenticationCertificateChain=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsMutualAuthenticationCertificateChain="/some/existing/path"</code></pre>
+</div>
+
+<button id="button_configuration_mtls_allow_bundled_ca" class="accordion title"><strong>Allow Inbound mTLS To Trust The Bundled CA (Unsafe)</strong></button>
+<div class="panel title">
+    <p>Let inbound mTLS (<a href="#button_configuration_require_mtls_for_all_tls_connections">tlsMutualAuthenticationRequired</a> or <a href="#button_configuration_mtls_certificate_chain">tlsMutualAuthenticationCertificateChain</a>) trust client certificates signed by the default CA bundled with MockServer.</p>
+    <p>That CA's private key is published in the MockServer jar, so with this set <strong>anyone can create a client certificate MockServer accepts</strong>, with any name, which also satisfies any client certificate condition in your expectations. Only use it for throwaway local tests. While it is set, a warning is logged whenever the bundled CA becomes trusted (at startup, when a configuration change makes it trusted, and each time the TLS context is rebuilt to trust it).</p>
+    <p>Without it, MockServer refuses to start, and <span class="inline_code">PUT /mockserver/configuration</span> answers <span class="inline_code">400</span>, when mTLS would trust the bundled CA. Instead, give MockServer its own CA with <a href="#button_configuration_tls_certificate_authority_certificate">certificateAuthorityCertificate</a> and <a href="#button_configuration_tls_certificate_authority_private_key">certificateAuthorityPrivateKey</a>, set <a href="#button_configuration_dynamically_create_ca_certificate">dynamicallyCreateCertificateAuthorityCertificate</a> to true, or set <a href="#button_configuration_mtls_certificate_chain">tlsMutualAuthenticationCertificateChain</a> to the CA that signs your client certificates. See <a href="/mock_server/HTTPS_TLS.html#mtls_data_plane">HTTPS &amp; TLS</a>.</p>
+    <p>It can only be set at startup; <span class="inline_code">PUT /mockserver/configuration</span> cannot change it.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">false</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.tlsMutualAuthenticationAllowBundledCa(boolean allow)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsMutualAuthenticationAllowBundledCa=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_TLS_MUTUAL_AUTHENTICATION_ALLOW_BUNDLED_CA=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.tlsMutualAuthenticationAllowBundledCa=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsMutualAuthenticationAllowBundledCa="true"</code></pre>
+</div>
+
+<br/><br/>
+<a id="tls_configuration_outbound_tls" class="anchor" href="#tls_configuration_outbound_tls">&nbsp;</a>
+
+<h3>Outbound Client TLS/mTLS (for Forwarded or Proxied Requests)</h3>
+
+<button id="button_configuration_trusted_tls_certs_group_for_proxied_reqs" class="accordion title"><strong>Outbound Trusted Certificates Group</strong></button>
+<div class="panel title">
+    <p>Configure trusted set of certificates for forwarded or proxied requests (i.e. TLS connections out of MockServer).</p>
+    <p>MockServer will only be able to establish a TLS connection to endpoints that have a trusted X.509 certificate according to the trust manager type, as follows:</p>
+    <ul>
+        <li>ANY - Insecure, trusts all X.509 certificates and does not perform host name verification (the default).</li>
+        <li>JVM - Trusts all X.509 certificates trusted by the JVM, and verifies the upstream host name against the certificate (unless <a href="#button_configuration_forward_proxy_hostname_verification">forwardProxyTLSHostnameVerificationEnabled</a> is set to false).</li>
+        <li>CUSTOM - Trusts all X.509 certificates specified in <a href="#button_configuration_custom_trusted_tls_certs_for_proxied_reqs">forwardProxyTLSCustomTrustX509Certificates</a> configuration value, and verifies the upstream host name against the certificate (unless <a href="#button_configuration_forward_proxy_hostname_verification">forwardProxyTLSHostnameVerificationEnabled</a> is set to false).</li>
+    </ul>
+    <p>When the TLS connection to the upstream cannot be established &mdash; for example its certificate is not trusted, is for another host name, the upstream does not speak TLS, the upstream closes the connection during the handshake, or the handshake takes longer than <span class="inline_code">socketConnectionTimeout</span> &mdash; MockServer answers the request with a <span class="inline_code">502 Bad Gateway</span> whose body says why, such as <span class="inline_code">TLS with the upstream failed: SSLHandshakeException: PKIX path building failed: ...</span>, and logs the failure as an error with the request. An upstream that closes the connection during the handshake, which is also how some servers refuse a TLS version or cipher they do not support, gives <span class="inline_code">TLS with the upstream failed: SSLHandshakeException: upstream closed the connection during the TLS handshake</span>.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">ANY</span></p>
+    <p>Java Code:</p>
+    <pre class="prettyprint lang-java code"><code class="code">ConfigurationProperties.forwardProxyTLSX509CertificatesTrustManagerType(ForwardProxyTLSX509CertificatesTrustManager trustManagerType)</code></pre>
+    <p>The parameter is the <span class="inline_code">org.mockserver.socket.tls.ForwardProxyTLSX509CertificatesTrustManager</span> enum (<span class="inline_code">ANY</span>, <span class="inline_code">JVM</span>, or <span class="inline_code">CUSTOM</span>), not a plain string &mdash; e.g. <span class="inline_code">ConfigurationProperties.forwardProxyTLSX509CertificatesTrustManagerType(ForwardProxyTLSX509CertificatesTrustManager.CUSTOM)</span>.</p>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyTLSX509CertificatesTrustManagerType=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_FORWARD_PROXY_TLS_X509_CERTIFICATES_TRUST_MANAGER_TYPE=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.forwardProxyTLSX509CertificatesTrustManagerType=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyTLSX509CertificatesTrustManagerType="CUSTOM"</code></pre>
+</div>
+
+<button id="button_configuration_forward_proxy_hostname_verification" class="accordion title"><strong>Outbound Host Name Verification</strong></button>
+<div class="panel title">
+    <p>Whether to verify the upstream host name against its certificate when MockServer forwards or proxies over TLS with a validating trust manager (<a href="#button_configuration_trusted_tls_certs_group_for_proxied_reqs">forwardProxyTLSX509CertificatesTrustManagerType</a> of <strong>JVM</strong> or <strong>CUSTOM</strong>).</p>
+    <p>The default is <span class="this_value">true</span>. Without host name verification, any certificate signed by a trusted CA — for any host name — would be accepted, which would leave MockServer open to a man-in-the-middle it believes it is protected from. So when you opt into real upstream validation (JVM or CUSTOM) the upstream host name is verified against the certificate as well.</p>
+    <p>This has no effect for the <strong>ANY</strong> trust manager type (the default), which deliberately trusts everything and performs no host name verification. Set this to <span class="inline_code">false</span> when you legitimately need to connect to an upstream whose certificate host name does not match the address you connect to (a common testing scenario) while still validating the certificate chain.</p>
+    <p>Type: <span class="keyword">boolean</span> Default: <span class="this_value">true</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.forwardProxyTLSHostnameVerificationEnabled(false)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyTLSHostnameVerificationEnabled=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_FORWARD_PROXY_TLS_HOSTNAME_VERIFICATION_ENABLED=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.forwardProxyTLSHostnameVerificationEnabled=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyTLSHostnameVerificationEnabled="false"</code></pre>
+</div>
+
+<h4>Fixed (i.e. Custom) Outbound CA X.509, Private Key & X.509</h4>
+
+<button id="button_configuration_custom_trusted_tls_certs_for_proxied_reqs" class="accordion title"><strong>Fixed Outbound X.509 Certificate Trust Chain</strong></button>
+<div class="panel title">
+    <p>File system path or classpath location of custom file for trusted X.509 Certificate Authority roots for forwarded or proxied requests (i.e. TLS connections out of MockServer), the certificate chain must be a X.509 PEM file.</p>
+    <p>MockServer will only be able to establish a TLS connection to endpoints that have an X.509 certificate chain that is signed by one of the provided custom certificates, i.e. where a path can be established from the endpoints X.509 certificate to one or more of the custom X.509 certificates provided.</p>
+    <p>This configuration only take effect if <a href="#button_configuration_trusted_tls_certs_group_for_proxied_reqs">forwardProxyTLSX509CertificatesTrustManagerType</a> is configured as <strong>CUSTOM</strong> otherwise this value is ignored.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">null</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.forwardProxyTLSCustomTrustX509Certificates(String customX509Certificates)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyTLSCustomTrustX509Certificates=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_FORWARD_PROXY_TLS_CUSTOM_TRUST_X509_CERTIFICATES=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.forwardProxyTLSCustomTrustX509Certificates=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyTLSCustomTrustX509Certificates="/some/existing/path"</code></pre>
+</div>
+
+<button id="button_configuration_forward_proxy_private_key" class="accordion title"><strong>Fixed Outbound Client Private Key</strong></button>
+<div class="panel title">
+    <p>File system path or classpath location of custom Private Key for forwarded or proxied requests (i.e. TLS connections out of MockServer), the private key must be a PKCS#8 or PKCS#1 PEM file</p>
+    <p>To convert a PKCS#1 (i.e. default for Bouncy Castle) to a PKCS#8 the following command can be used: openssl pkcs8 -topk8 -inform PEM -in private_key_PKCS_1.pem -out private_key_PKCS_8.pem -nocrypt</p>
+    <p>This private key will be used if MockServer needs to perform mTLS (client authentication) for outbound TLS connections.</p>
+    <p>If this file, or the certificate chain, is not valid PEM, every forward over TLS is answered with a <span class="inline_code">502 Bad Gateway</span> whose body is <span class="inline_code">connection to the upstream could not be set up: RuntimeException: Exception creating SSL context for client</span>, and the error is logged with its cause. Such a forward is not retried and does not count against the forward circuit breaker, because the upstream was never reached.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">null</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.forwardProxyPrivateKey(String privateKey)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyPrivateKey=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_FORWARD_PROXY_TLS_PRIVATE_KEY=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.forwardProxyPrivateKey=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyPrivateKey="/some/existing/path"</code></pre>
+</div>
+
+<button id="button_configuration_forward_proxy_certificate_chain" class="accordion title"><strong>Fixed Outbound Client X.509 Certificate Chain</strong></button>
+<div class="panel title">
+    <p>File system path or classpath location of custom X.509 Certificate Chain for forwarded or proxied requests (i.e. TLS connections out of MockServer), the certificates must be a X.509 PEM file</p>
+    <p>This certificate chain will be used if MockServer needs to perform mTLS (client authentication) for outbound TLS connections.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">null</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.forwardProxyCertificateChain(String certificateChain)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyCertificateChain=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_FORWARD_PROXY_TLS_X509_CERTIFICATE_CHAIN=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.forwardProxyCertificateChain=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyCertificateChain="/some/existing/path"</code></pre>
+</div>
+
+<button id="button_configuration_forward_proxy_client_certificates_by_host" class="accordion title"><strong>Per-Host Outbound Client Certificate/Key (mTLS)</strong></button>
+<div class="panel title">
+    <p>Present a different client certificate and key for outbound mTLS depending on which upstream host MockServer is connecting to. By default the fixed outbound client key/certificate above are used for every upstream; this property lets you override them per host.</p>
+    <p>The value is a comma-separated list of <code>host=certificateChainPath;privateKeyPath</code> entries. When MockServer opens a TLS connection to a matching upstream host (matched case-insensitively), it presents that host's certificate/key pair; any host that is not listed falls back to the fixed outbound client key/certificate (or, if those are not set, MockServer's own generated certificate). Each certificate chain is an X.509 PEM file and each private key a PKCS#8 or PKCS#1 PEM file.</p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">null</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.forwardProxyClientCertificatesByHost(String clientCertificatesByHost)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyClientCertificatesByHost=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_FORWARD_PROXY_CLIENT_CERTIFICATES_BY_HOST=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.forwardProxyClientCertificatesByHost=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.forwardProxyClientCertificatesByHost="api.internal=/certs/api-chain.pem;/certs/api-key.pem,billing.internal=/certs/billing-chain.pem;/certs/billing-key.pem"</code></pre>
+</div>
+
+<a id="tls_configuration_mockserver_client" class="anchor" href="#tls_configuration_mockserver_client">&nbsp;</a>
+
+<h4>MockServer Client </h4>
+
+<button id="button_configuration_mtls_mockserver_client_certificate_chain" class="accordion title"><strong>MockServerClient Trust X.509 Certificate Chain (for trusting MockServer / load-balancer certificates)</strong></button>
+<div class="panel title">
+    <p>File system path or classpath location of custom mTLS (TLS client authentication) X.509 Certificate Chain for Trusting (i.e. signature verification of) MockServer X.509 Certificates, the certificate chain must be a X.509 PEM file. This certificate chain will only be used if MockServerClient performs TLS to calls to MockServer.</p>
+    <p>This settings is particularly used when connecting to MockServer via a load-balancer or other TLS terminating network infrastructure with its own X.509 Certificate.</p>
+    <p>This configuration property is also used for MockServer to trust <a href="#button_configuration_mtls_certificate_chain">inbound mTLS client authentication X.509 certificates</a></p>
+    <p>Type: <span class="keyword">string</span> Default: <span class="this_value">null</span></p>
+    <p>Java Code:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">ConfigurationProperties.tlsMutualAuthenticationCertificateChain(String certificateChain)</code></pre>
+    <p>System Property:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsMutualAuthenticationCertificateChain=...</code></pre>
+    <p>Environment Variable:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">MOCKSERVER_TLS_MUTUAL_AUTHENTICATION_CERTIFICATE_CHAIN=...</code></pre>
+    <p>Property File:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">mockserver.tlsMutualAuthenticationCertificateChain=...</code></pre>
+    <p>Example:</p>
+    <pre class="code" style="padding: 2px;"><code class="code">-Dmockserver.tlsMutualAuthenticationCertificateChain="/some/existing/path"</code></pre>
+</div>

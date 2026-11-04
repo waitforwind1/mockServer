@@ -1,0 +1,76 @@
+# CODEOWNERS — required reviewers for high-stakes paths.
+#
+# This file is only enforced when branch protection has
+# `required_pull_request_reviews.require_code_owner_reviews: true`.
+#
+# Owner: @jamesdbloom
+
+# Release and CI/CD orchestration
+/scripts/release/**            @jamesdbloom
+/.buildkite/**                 @jamesdbloom
+/.github/workflows/**          @jamesdbloom
+/.github/dependabot.yml        @jamesdbloom
+/.github/CODEOWNERS            @jamesdbloom
+/.github/actions/**            @jamesdbloom
+/.github/scripts/**            @jamesdbloom
+/.github/zizmor/**             @jamesdbloom
+
+# AI agent configuration
+/.opencode/**                  @jamesdbloom
+/.claude/**                    @jamesdbloom
+/AGENTS.md                     @jamesdbloom
+/CLAUDE.md                     @jamesdbloom
+/opencode.jsonc                @jamesdbloom
+/scripts/security/**           @jamesdbloom
+
+# Infrastructure as Code
+/terraform/**                  @jamesdbloom
+
+# Container build and runtime images
+/docker/**                     @jamesdbloom
+/docker_build/**               @jamesdbloom
+
+# Helm chart
+/helm/**                       @jamesdbloom
+
+# Maven release coordinates
+/mockserver/pom.xml            @jamesdbloom
+/pom.xml                       @jamesdbloom
+
+# AI agent configuration anywhere in the tree (last so no later rule overrides it)
+AGENTS.md                      @jamesdbloom
+CLAUDE.md                      @jamesdbloom
+CLAUDE.local.md                @jamesdbloom
+GEMINI.md                      @jamesdbloom
+SKILL.md                       @jamesdbloom
+.mcp.json                      @jamesdbloom
+opencode.json                  @jamesdbloom
+opencode.jsonc                 @jamesdbloom
+.claude/                       @jamesdbloom
+.opencode/                     @jamesdbloom
+.cursor/                       @jamesdbloom
+.cursorrules                   @jamesdbloom
+.windsurf/                     @jamesdbloom
+.windsurfrules                 @jamesdbloom
+.continue/                     @jamesdbloom
+.codex/                        @jamesdbloom
+.gemini/                       @jamesdbloom
+.aider*                        @jamesdbloom
+.roo/                          @jamesdbloom
+.kiro/                         @jamesdbloom
+.amazonq/                      @jamesdbloom
+.junie/                        @jamesdbloom
+.clinerules                    @jamesdbloom
+AGENT.md                       @jamesdbloom
+.rules                         @jamesdbloom
+.goosehints                    @jamesdbloom
+/.github/copilot-instructions.md @jamesdbloom
+/.github/instructions/         @jamesdbloom
+/.github/prompts/              @jamesdbloom
+/.github/agents/               @jamesdbloom
+/.github/chatmodes/            @jamesdbloom
+**/.vscode/settings.json       @jamesdbloom
+**/.vscode/mcp.json            @jamesdbloom
+*.code-workspace               @jamesdbloom
+.devcontainer/                 @jamesdbloom
+.devcontainer.json             @jamesdbloom

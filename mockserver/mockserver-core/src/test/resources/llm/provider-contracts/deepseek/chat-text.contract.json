@@ -1,0 +1,36 @@
+{
+  "description": "DeepSeek chat completions, text reply",
+  "source": "https://api-docs.deepseek.com/api/create-chat-completion (200 (No streaming) Example)",
+  "retrieved": "2026-10-12",
+  "request": {
+    "method": "POST",
+    "path": "/chat/completions",
+    "body": {
+      "model": "deepseek-flash",
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a helpful assistant"
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ]
+    }
+  },
+  "httpLlmResponse": {
+    "provider": "DEEPSEEK",
+    "model": "deepseek-flash",
+    "completion": {
+      "text": "Hello! How can I help you today?",
+      "usage": {
+        "inputTokens": 16,
+        "outputTokens": 10
+      }
+    }
+  },
+  "response": "chat-text.response.json",
+  "format": "JSON",
+  "allowed": []
+}

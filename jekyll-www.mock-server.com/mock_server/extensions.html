@@ -1,0 +1,441 @@
+---
+title: Extensions
+description: Load your own Java code into MockServer at startup to seed expectations, serve your own control-plane routes, listen to requests and expectation changes, add template helpers, filter every request, transform every response, and run start-up and shut-down logic.
+layout: page
+pageOrder: 7
+section: 'Protocols & Advanced'
+subsection: true
+sitemap:
+  priority: 0.6
+  changefreq: 'monthly'
+---
+
+<p>An extension is a Java class of your own that MockServer loads and starts when it starts, and stops when it stops. Extensions can only be configured at startup: the control plane (<span class="inline_code">PUT /mockserver/configuration</span>) cannot add, remove or change them, so nobody who can reach MockServer over the network can load code into it.</p>
+
+<p>Extensions are trusted code. They run inside MockServer with the same access as MockServer itself, so only load extensions you wrote or trust.</p>
+
+<p>When no extension is configured, MockServer loads none of the extension machinery and scans nothing, so start-up time and request handling are unchanged.</p>
+
+<h2>Writing an extension</h2>
+
+<p>Implement <span class="inline_code">org.mockserver.extension.Extension</span>, which is in <span class="inline_code">mockserver-core</span>. Add MockServer to your build with <span class="inline_code">provided</span> scope, as MockServer supplies it at runtime. A class loaded by name needs a public no-argument constructor.</p>
+
+<pre class="prettyprint lang-java code">
+package com.example;
+
+import org.mockserver.extension.Extension;
+import org.mockserver.extension.ExtensionContext;
+
+import java.util.List;
+
+public class AuditExtension implements Extension {
+
+    @Override
+    public String name() {
+        return "audit"; // unique; lower-case letters, digits and '-'
+    }
+
+    @Override
+    public void start(ExtensionContext context) {
+        // runs before MockServer builds anything else; throw to refuse start-up
+    }
+
+    @Override
+    public void onStarted(List&lt;Integer&gt; ports) {
+        // runs once every port is bound; /mockserver/ready stays not-ready until it returns
+    }
+
+    @Override
+    public void stop() {
+        // runs when MockServer stops
+    }
+}
+</pre>
+
+<p>Every method except <span class="inline_code">name()</span> is optional. Extensions start in order of <span class="inline_code">priority()</span> (lowest first, default <span class="inline_code">0</span>), then by name, and stop in the reverse order.</p>
+
+<h3>Seeding expectations</h3>
+
+<p>An extension that also implements <span class="inline_code">org.mockserver.server.initialize.ExpectationInitializer</span> has its expectations loaded when MockServer starts, after the <a href="/mock_server/initializing_expectations.html">configured initialisers</a>:</p>
+
+<pre class="prettyprint lang-java code">
+public class SeedExtension implements Extension, ExpectationInitializer {
+
+    @Override
+    public String name() {
+        return "seed";
+    }
+
+    @Override
+    public Expectation[] initializeExpectations() {
+        return new Expectation[]{
+            new Expectation(request().withPath("/health")).thenRespond(response().withBody("ok"))
+        };
+    }
+}
+</pre>
+
+<a id="admin_routes" class="anchor" href="#admin_routes">&nbsp;</a>
+<h3>Serving your own control-plane routes</h3>
+
+<p>An extension that also implements <span class="inline_code">org.mockserver.extension.AdminApiExtension</span> answers every request under <span class="inline_code">/mockserver/extensions/&lt;name&gt;/</span>, where <span class="inline_code">&lt;name&gt;</span> is its <span class="inline_code">name()</span>. Use it to add your own operations next to MockServer's, for example to reload test data or report the state your extension keeps:</p>
+
+<pre class="prettyprint lang-java code">
+public class TestDataExtension implements Extension, AdminApiExtension {
+
+    @Override
+    public String name() {
+        return "test-data";
+    }
+
+    @Override
+    public HttpResponse handle(HttpRequest request, String subPath) {
+        // PUT /mockserver/extensions/test-data/reload has subPath "/reload"
+        if (subPath.equals("/reload")) {
+            reload();
+            return response().withStatusCode(200).withBody("reloaded");
+        }
+        return null; // answered 404
+    }
+
+    @Override
+    public boolean isReadOnly(String method, String subPath) {
+        return subPath.equals("/status"); // only /status can be called with the read role
+    }
+}
+</pre>
+
+<p>These routes are part of the control plane, so they are protected exactly like MockServer's own:</p>
+<ul>
+    <li>the same <a href="/mock_server/control_plane_authorisation.html">control-plane authentication</a> (JWT, mTLS or OIDC) applies, so a caller without valid credentials gets <span class="inline_code">401</span> and your code is never called;</li>
+    <li>with <span class="inline_code">controlPlaneAuthorizationEnabled</span>, every route needs the role that may change state, <span class="inline_code">GET</span> included, unless <span class="inline_code">isReadOnly</span> returns true for it; a caller without the role gets <span class="inline_code">403</span>. <span class="inline_code">isReadOnly</span> is only asked once the caller has been authenticated;</li>
+    <li>the same browser-origin check and CORS headers apply, and calls are recorded in the control-plane audit log when it is on.</li>
+</ul>
+
+<p>Your code never runs on MockServer's network threads, so a slow route cannot hold up mocked responses:</p>
+<ul>
+    <li>at most <a href="/mock_server/configuration_properties.html#button_configuration_extension_admin_max_in_flight"><span class="inline_code">extensionAdminMaxInFlight</span></a> calls (default 32) run at once; a call beyond that gets <span class="inline_code">503</span> with <span class="inline_code">Retry-After: 1</span>, including a call your route makes back into MockServer while the limit is reached;</li>
+    <li>a call that has not answered within <a href="/mock_server/configuration_properties.html#button_configuration_extension_admin_timeout_millis"><span class="inline_code">extensionAdminTimeoutMillis</span></a> (default 30 seconds) gets <span class="inline_code">500</span>, and your code is interrupted; what it returns afterwards is discarded. The call keeps its place in the limit until your code returns, so code that ignores the interrupt makes later calls get <span class="inline_code">503</span>;</li>
+    <li>a call made while MockServer is stopping gets <span class="inline_code">503</span>, and your code is not called;</li>
+    <li>an exception gets <span class="inline_code">500</span> with a correlation id that you can find in the MockServer log; the exception's message is not sent to the caller;</li>
+    <li>in a WAR your code runs on the servlet container's request thread, and in-process on the thread that called <span class="inline_code">handle</span>, with the same limit but no timeout.</li>
+</ul>
+
+<p>Only the names of loaded extensions are taken. Any other path under <span class="inline_code">/mockserver/extensions/</span> behaves as it did before, so an expectation for it still matches. An expectation for a path under a loaded extension's name no longer matches, and MockServer logs a warning at start-up for each such expectation it loads then.</p>
+
+<h3>Listening to what MockServer does</h3>
+
+<p>An extension can also implement one or more listener interfaces, like WireMock's <span class="inline_code">ServeEventListener</span>, <span class="inline_code">StubLifecycleListener</span> and <span class="inline_code">GlobalSettingsListener</span>:</p>
+
+<table class="table table-bordered">
+    <tr><th>Interface</th><th>Told about</th></tr>
+    <tr><td><span class="inline_code">ServeEventListener</span></td><td>Each request MockServer answered: a mocked response, a forwarded response or the not-matched response, with the request, the response, the id of the expectation that answered it and when. Bodies are cut to <a href="/mock_server/configuration_properties.html#button_configuration_max_logged_body_bytes"><span class="inline_code">maxLoggedBodyBytes</span></a> when that is set; headers are not redacted. Load-test traffic MockServer generates itself is not reported.</td></tr>
+    <tr><td><span class="inline_code">ExpectationLifecycleListener</span></td><td>Each expectation added, updated or removed, and why: <span class="inline_code">API</span>, <span class="inline_code">FILE_INITIALISER</span>, <span class="inline_code">CLASS_INITIALISER</span>, <span class="inline_code">FILE_WATCHER</span>, <span class="inline_code">EXHAUSTED</span> (no matches left), <span class="inline_code">EXPIRED</span> (its time to live passed), <span class="inline_code">EVICTED</span> (to stay within <span class="inline_code">maxExpectations</span>) or <span class="inline_code">CLUSTER</span> (another node changed it).</td></tr>
+    <tr><td><span class="inline_code">SettingsListener</span></td><td>Each <span class="inline_code">PUT /mockserver/configuration</span>, after it has been applied. Calling <span class="inline_code">Configuration</span> setters in your own code does not notify it.</td></tr>
+</table>
+
+<pre class="prettyprint lang-java code">
+public class TrafficRecorder implements ServeEventListener, ExpectationLifecycleListener {
+
+    @Override
+    public String name() {
+        return "traffic-recorder";
+    }
+
+    @Override
+    public void onServed(ServeEvent event) {
+        // event.disposition(), event.request(), event.response(), event.expectationId()
+    }
+
+    @Override
+    public void onChange(ExpectationChange change) {
+        if (change.type() == ExpectationChange.Type.REMOVED &amp;&amp; change.cause() == ChangeCause.EXHAUSTED) {
+            // an expectation has used up its matches
+        }
+    }
+}
+</pre>
+
+<p>Each listener extension gets a thread of its own, so a listener may block or do slow work without slowing MockServer down. Expectation changes wait in a queue in the order MockServer made them; when a listener falls too far behind, further events for it are dropped (see <a href="/mock_server/configuration_properties.html#button_configuration_extension_listener_queue_size"><span class="inline_code">extensionListenerQueueSize</span></a> and <a href="/mock_server/configuration_properties.html#button_configuration_extension_listener_max_bytes"><span class="inline_code">extensionListenerMaxBytes</span></a>) and counted in the <span class="inline_code">mock_server_extension_listener_dropped_total</span> metric. A dropped event never affects the event log or verification. An exception thrown by a listener is logged once and counted in <span class="inline_code">mock_server_extension_errors_total</span>, and later events are still delivered. When MockServer stops, it delivers what is still queued for up to <span class="inline_code">stopDrainMillis</span> before stopping the extensions.</p>
+
+<p>An expectation that runs out of matches is reported as soon as the response that used its last match completes. An expectation whose time to live passes with no traffic is reported when a later request or a retrieve next finds it. The expectation in a change is MockServer's own, not a copy, so read it but do not change it.</p>
+
+<a id="template_helpers" class="anchor" href="#template_helpers">&nbsp;</a>
+
+<h3>Template helpers</h3>
+
+<p>An extension that also implements <span class="inline_code">org.mockserver.extension.TemplateHelperProvider</span> adds its own helpers to <a href="/mock_server/response_templates.html#extension_helpers">response and forward templates</a>, under <span class="inline_code">ext.&lt;extension name&gt;</span>. Velocity and JavaScript templates call the methods of a public interface you choose; Mustache templates use a section helper, which receives the section after it has been rendered:</p>
+
+<pre class="prettyprint lang-java code">
+public class AcmeHelpers implements TemplateHelperProvider {
+
+    public interface Strings {          // must be a public interface
+        String upper(String value);
+    }
+
+    @Override
+    public String name() {
+        return "acme";
+    }
+
+    @Override
+    public Map&lt;Class&lt;?&gt;, Object&gt; helpers() {
+        // Velocity: $ext.acme.Strings.upper($request.path)
+        // JavaScript: ext.acme.Strings.upper(request.path)
+        return Map.of(Strings.class, (Strings) value -&gt; value.toUpperCase());
+    }
+
+    @Override
+    public Map&lt;String, MustacheHelper&gt; mustacheHelpers() {
+        // Mustache: {{#ext.acme.upper}}{{request.path}}{{/ext.acme.upper}}
+        return Map.of("upper", section -&gt; section.toUpperCase());
+    }
+}
+</pre>
+
+<p>How helpers run:</p>
+<ul>
+    <li>Only a response template (<span class="inline_code">httpResponseTemplate</span>) or a forward template (<span class="inline_code">httpForwardTemplate</span>) can call a helper. Any other template that calls one (a webhook, a secondary action, a delay, a templated file body, a stream, a load scenario or the template dry run) fails with an error saying so.</li>
+    <li>Each call runs on a helper thread of its own, never on a thread that handles network traffic, so a slow helper cannot hold up other requests.</li>
+    <li>All the helper calls one template makes share one time budget, <a href="/mock_server/configuration_properties.html#button_configuration_extension_helper_timeout_millis"><span class="inline_code">extensionHelperTimeoutMillis</span></a> (default 1 second). A call still running when it is used up is interrupted and the template fails, like any other failing template.</li>
+    <li>At most <a href="/mock_server/configuration_properties.html#button_configuration_extension_helper_max_in_flight"><span class="inline_code">extensionHelperMaxInFlight</span></a> calls (default 32) run at once; a call over that limit fails its template at once. A helper cannot call another helper.</li>
+    <li>Helpers work the same over HTTP/1.1, HTTP/2 and HTTP/3.</li>
+</ul>
+
+<p>Give helper methods string, number or boolean parameters. A JavaScript object or array passed to a helper cannot be read on the helper's thread, so pass it as <span class="inline_code">JSON.stringify(...)</span> and parse it in the helper. When a helper throws, the template's error names only the exception's type, so a client never sees what the exception says; the MockServer log has the full exception.</p>
+
+<p>Keep helpers short and non-blocking. Anyone who can create an expectation can call them, so a helper must not return an object that exposes reflection or class loading, which would get round <span class="inline_code">velocityDisallowClassLoading</span> and the JavaScript class allow-list: return strings, numbers, booleans or plain data.</p>
+
+<a id="request_filters_and_response_transformers" class="anchor" href="#request_filters_and_response_transformers">&nbsp;</a>
+
+<h3>Filtering every request and transforming every response</h3>
+
+<p>Two more interfaces apply one rule to all the traffic MockServer serves, like WireMock's <span class="inline_code">RequestFilterV2</span> and <span class="inline_code">ResponseTransformerV2</span>. Both are <strong>experimental</strong>: they may change in the next minor release.</p>
+
+<table class="table table-bordered">
+    <tr><th>Interface</th><th>Sees</th><th>Can</th><th>Typical uses</th></tr>
+    <tr><td><span class="inline_code">RequestFilter</span></td><td>each request before MockServer matches it against your expectations, except the few <a href="#request_filters_not_seen">listed below</a></td><td>let it through, change it, or answer it at once</td><td>reject requests without a test API key or token; normalise requests, such as removing a path prefix or renaming a header, so expectations stay simple</td></tr>
+    <tr><td><span class="inline_code">ResponseTransformer</span></td><td>each response just before MockServer sends it: mocked, forwarded and proxied responses, and the responses MockServer makes itself, such as its "no expectation matched" <span class="inline_code">404</span></td><td>return a changed response</td><td>add a header to every response; give MockServer's own errors the error format your API uses; rewrite something in every forwarded response</td></tr>
+</table>
+
+<p>Use them when one rule has to apply to nearly all the traffic MockServer serves. For behaviour that belongs to one endpoint, an expectation (with a <a href="/mock_server/response_templates.html">template</a> or a callback where needed) is simpler. With no filter or transformer loaded, request handling is exactly as it is without them.</p>
+
+<a id="request_filters" class="anchor" href="#request_filters">&nbsp;</a>
+
+<h4>Writing a request filter</h4>
+
+<p>This filter answers <span class="inline_code">401</span> to any request without the right <span class="inline_code">X-Api-Key</span> header, lets browsers' CORS preflights through, and removes the key from requests it lets through, so your expectations and recorded requests never contain it. It shows how a filter works; it is not an access control, because a few kinds of request are answered without reaching any filter (<a href="#request_filters_not_seen">listed below</a>). To require credentials on every mocked endpoint, use <a href="/mock_server/configuration_properties.html#button_configuration_data_plane_authentication_required"><span class="inline_code">dataPlaneAuthenticationRequired</span></a> instead.</p>
+
+<!-- Both example classes on this page are compiled and tested in examples/java (RequestFilterAndResponseTransformerExampleTest), which fails unless each <pre> below equals its source file. CI runs that test only in the mockserver-java pipeline, so after editing either here or in examples/java, run it locally: mockserver/mvnw -f examples/java/pom.xml test -Dtest=RequestFilterAndResponseTransformerExampleTest -->
+
+<pre class="prettyprint lang-java code">
+package com.example;
+
+import org.mockserver.extension.FilterContext;
+import org.mockserver.extension.FilterResult;
+import org.mockserver.extension.RequestFilter;
+import org.mockserver.model.HttpRequest;
+
+import static org.mockserver.model.HttpResponse.response;
+
+public class ApiKeyRequestFilter implements RequestFilter {
+
+    @Override
+    public String name() {
+        return "api-key";
+    }
+
+    @Override
+    public FilterResult filter(HttpRequest request, FilterContext context) {
+        if (context.isCorsPreflight()) {
+            // a browser sends its CORS preflight without the key, so let it through
+            return FilterResult.proceed();
+        }
+        if (!"let-me-in".equals(request.getFirstHeader("X-Api-Key"))) {
+            // answer now: no expectation is matched and no later filter runs
+            return FilterResult.respond(response().withStatusCode(401).withBody("missing or wrong X-Api-Key"));
+        }
+        // continue without the key, so expectations and recorded requests never show it
+        return FilterResult.proceedWith(request.removeHeader("X-Api-Key"));
+    }
+}
+</pre>
+
+<p>A filter returns one of three results:</p>
+<ul>
+    <li><span class="inline_code">FilterResult.proceed()</span> &mdash; carry on with the request as it was before this filter ran. The filter is given its own copy of the request, so changes it made to that copy are thrown away.</li>
+    <li><span class="inline_code">FilterResult.proceedWith(request)</span> &mdash; carry on with this request instead, usually the copy the filter was given, changed. Facts about the connection, such as the client's address, its TLS certificate and the HTTP version, are always kept from the original request.</li>
+    <li><span class="inline_code">FilterResult.respond(response)</span> &mdash; answer the request now. No expectation is matched and later filters do not run. Response transformers still see this response.</li>
+</ul>
+
+<p>The <span class="inline_code">FilterContext</span> tells the filter about the request: <span class="inline_code">correlationId()</span> (the id MockServer's log entries for the request carry), <span class="inline_code">protocol()</span>, <span class="inline_code">isSecure()</span>, <span class="inline_code">remoteAddress()</span>, <span class="inline_code">isProxyRequest()</span>, <span class="inline_code">isCorsPreflight()</span> and <span class="inline_code">isGrpc()</span>.</p>
+
+<p>With several filters, they run in order of <span class="inline_code">priority()</span> (lowest first), then by name, and the first one that answers stops the rest. MockServer logs the order when it starts. The event log, verification and the dashboard see the request as the filters left it; when a filter changed a request, an extra log entry, "request filtered by", records the request as it was received. A request a filter answered is logged like a mocked response, with no expectation id.</p>
+
+<p>A filter <strong>fails</strong> when it throws an exception, returns <span class="inline_code">null</span>, takes longer than <a href="/mock_server/configuration_properties.html#button_configuration_extension_data_plane_timeout_millis"><span class="inline_code">extensionDataPlaneTimeoutMillis</span></a>, or breaks one of these rules:</p>
+<ul>
+    <li>it may not move a request onto MockServer's control plane, that is under <span class="inline_code">/mockserver/</span> or <span class="inline_code">/_mockserver_</span>;</li>
+    <li>for a gRPC request (<span class="inline_code">isGrpc()</span>), it may not change the path or the <span class="inline_code">x-grpc-service</span> and <span class="inline_code">x-grpc-method</span> headers;</li>
+    <li>it may not answer with an interim (<span class="inline_code">1xx</span>) response.</li>
+</ul>
+<p>A request whose filter fails is answered <span class="inline_code">500</span>. The response names the extension and the kind of failure, and a correlation id to find the details in the MockServer log; the exception's message is never sent to the client. To let the request carry on instead, override <span class="inline_code">failOpen()</span> to return <span class="inline_code">true</span>. After a throw, a <span class="inline_code">null</span> or a broken rule, the request then carries on as it was before that filter ran, and the later filters still run. After a timeout, the later filters do not run, and the request carries on as it was before that filter ran only if every later filter also fails open; otherwise it is answered <span class="inline_code">500</span>.</p>
+
+<a id="request_filters_not_seen" class="anchor" href="#request_filters_not_seen">&nbsp;</a>
+
+<p><strong>Requests that filters do not see.</strong> These requests are answered without any filter running, so neither a filter nor a transformer can change or refuse them:</p>
+<ul>
+    <li>requests to MockServer's control plane (<span class="inline_code">/mockserver/...</span> operations such as creating expectations), and CORS preflights for them;</li>
+    <li>requests MockServer refuses before matching, such as a <span class="inline_code">401</span> from data-plane authentication, or a request that is too large or malformed;</li>
+    <li>over HTTP/1.1, requests matched by an expectation that uses <span class="inline_code">respondBeforeBody</span>, which is answered as soon as the request's headers arrive;</li>
+    <li>gRPC bidirectional streaming calls answered by a <span class="inline_code">grpcBidiResponse</span> expectation (a client-streaming call, or a bidirectional call no such expectation answers, is filtered as one request once all its messages have arrived);</li>
+    <li>gRPC calls answered by MockServer's built-in gRPC health check or server reflection, or by a fault from a gRPC chaos profile;</li>
+    <li>traffic that is not an HTTP request matched against expectations: binary (TCP) proxying, DNS, and MockServer's own WebSocket endpoints, such as the dashboard's.</li>
+</ul>
+
+<a id="response_transformers" class="anchor" href="#response_transformers">&nbsp;</a>
+
+<h4>Writing a response transformer</h4>
+
+<p>This transformer adds an <span class="inline_code">X-Served-By</span> header to every response, and gives MockServer's own "no expectation matched" <span class="inline_code">404</span> a JSON body:</p>
+
+<pre class="prettyprint lang-java code">
+package com.example;
+
+import org.mockserver.extension.ResponseTransformer;
+import org.mockserver.extension.TransformContext;
+import org.mockserver.model.HttpRequest;
+import org.mockserver.model.HttpResponse;
+
+import static org.mockserver.model.JsonBody.json;
+
+public class ServedByResponseTransformer implements ResponseTransformer {
+
+    @Override
+    public String name() {
+        return "served-by";
+    }
+
+    @Override
+    public HttpResponse transform(HttpRequest request, HttpResponse response, TransformContext context) {
+        response.replaceHeader("X-Served-By", "mockserver");
+        if (context.isGenerated() &amp;&amp; Integer.valueOf(404).equals(response.getStatusCode())) {
+            // MockServer's own "no expectation matched" response gets a JSON body; leave Content-Length
+            // alone and MockServer sets it to the length of the new body
+            response.withBody(json("{\"error\": \"no expectation matched this request\"}"));
+        }
+        return response;
+    }
+}
+</pre>
+
+<p>A transformer is given copies of the request and the response, and returns the response to send, which may be the copy it was given, changed. The <span class="inline_code">TransformContext</span> has the same facts as a filter's, and three about the response:</p>
+<ul>
+    <li><span class="inline_code">isGenerated()</span> is true when MockServer made the response itself rather than an expectation, an upstream or a callback: its <span class="inline_code">404</span> when no expectation matched, an overload <span class="inline_code">503</span>, a rate-limit <span class="inline_code">429</span>, a chaos error, a failed template or forward, a breakpoint abort, or a filter's <span class="inline_code">respond()</span>;</li>
+    <li><span class="inline_code">expectationId()</span> is the id of the expectation that answered, when there is one;</li>
+    <li><span class="inline_code">isStreamed()</span> is true when the body is streamed (such as a chunked forwarded response). The transformer then sees only the status and headers, and may change only those.</li>
+</ul>
+
+<p>With several transformers, they run in the reverse of the filter order: highest <span class="inline_code">priority()</span> first, then by name in reverse. So an extension that is both a filter and a transformer, and whose filter ran first, sees the response last. When a transformer changed a response, the event log adds a "response transformed by" entry recording the response that was sent.</p>
+
+<p>Things to get right in a transformer:</p>
+<ul>
+    <li><strong>Content-Length.</strong> When a transformer changes the body and leaves the <span class="inline_code">Content-Length</span> header it was given, MockServer removes that header and sends the length of the new body. A <span class="inline_code">Content-Length</span> the transformer set or changed itself is sent exactly as it is. If that value is wrong, the client reads the wrong number of bytes: over HTTP/1.1 the response is cut short, or the client waits for bytes that never come, and the keep-alive connection can no longer be used for the next request. Unless you have a reason to, do not set <span class="inline_code">Content-Length</span>; if you are unsure, remove it.</li>
+    <li><strong>Compressed forwarded bodies.</strong> A forwarded or proxied response's body is as the upstream sent it, which may be compressed, as its <span class="inline_code">Content-Encoding</span> header says. A transformer that replaces such a body must also set or remove <span class="inline_code">Content-Encoding</span> to match the new body.</li>
+    <li><strong>Headers added afterwards.</strong> CORS headers and <span class="inline_code">defaultResponseHeaders</span> are added after the transformers run, so a transformer cannot remove them.</li>
+</ul>
+
+<p>A transformer <strong>fails</strong> when it throws an exception, returns <span class="inline_code">null</span>, takes longer than <span class="inline_code">extensionDataPlaneTimeoutMillis</span>, or replaces the body of a streamed response. Its response is then replaced by a <span class="inline_code">500</span> naming the extension, with a correlation id; with <span class="inline_code">failOpen()</span> returning <span class="inline_code">true</span>, a throw, a <span class="inline_code">null</span> or a replaced streamed body instead lets the response as it was before that transformer ran carry on to the next transformer, or be sent. After a timeout, the later transformers do not run, and the response as it was before that transformer ran is sent only if every later transformer also fails open; otherwise it is replaced by a <span class="inline_code">500</span>.</p>
+
+<p>Transformers do not see: responses from the control plane (<span class="inline_code">/mockserver/...</span> operations), MockServer's own answer to a CORS preflight, interim (<span class="inline_code">1xx</span>) responses, SSE, WebSocket and streaming gRPC responses, the answers to the requests that <a href="#request_filters_not_seen">filters do not see</a> (such as expectations that use <span class="inline_code">respondBeforeBody</span>, and gRPC health, reflection and chaos-profile faults), errors that close or reset the connection instead of sending a response, responses to requests MockServer refuses before matching (such as a data-plane authentication <span class="inline_code">401</span>), and the <span class="inline_code">500</span> or <span class="inline_code">503</span> MockServer sends when a filter or transformer fails. A gRPC unary response is shown as JSON, before it is encoded.</p>
+
+<a id="request_filters_and_response_transformers_notes" class="anchor" href="#request_filters_and_response_transformers_notes">&nbsp;</a>
+
+<h4>How filters and transformers run, and what to watch for</h4>
+
+<ul>
+    <li><strong>Their own threads, with a time limit.</strong> Filters and transformers never run on the threads that serve connections, so a slow one cannot hold up other requests. All the filters for one request share one time budget, <a href="/mock_server/configuration_properties.html#button_configuration_extension_data_plane_timeout_millis"><span class="inline_code">extensionDataPlaneTimeoutMillis</span></a> (default 1 second), and so do all the transformers for one response; a filter or transformer still running at the end is interrupted, and whatever it returns afterwards is ignored. At most <a href="/mock_server/configuration_properties.html#button_configuration_extension_data_plane_max_in_flight"><span class="inline_code">extensionDataPlaneMaxInFlight</span></a> filter and transformer runs (default 32) happen at once; a request beyond that is answered <span class="inline_code">503</span> with <span class="inline_code">Retry-After: 1</span>, unless every extension involved fails open, when they are skipped. A gRPC call's <span class="inline_code">grpc-timeout</span> includes the time its filters and transformers take. In a WAR, and for <span class="inline_code">InProcessMockServer.handle</span>, the thread handling the request waits for them, for at most the time limit. If MockServer stops while one is still running, the request is answered <span class="inline_code">503</span>; over HTTP/1.1 and HTTP/2, MockServer first waits up to <span class="inline_code">stopDrainMillis</span> for it to finish.</li>
+    <li><strong>Not an access control.</strong> A filter is not a way to protect MockServer: some requests are answered without reaching it (<a href="#request_filters_not_seen">listed above</a>). To require credentials on every mocked endpoint, use <a href="/mock_server/configuration_properties.html#button_configuration_data_plane_authentication_required"><span class="inline_code">dataPlaneAuthenticationRequired</span></a>; it is checked before any filter runs. To protect the control plane, such as creating expectations or retrieving recorded requests, use <a href="/mock_server/control_plane_authorisation.html">control-plane authentication</a>.</li>
+    <li><strong>CORS preflights.</strong> A browser sends a CORS preflight (an <span class="inline_code">OPTIONS</span> request with <span class="inline_code">Origin</span> and <span class="inline_code">Access-Control-Request-Method</span> headers) before many cross-origin requests, and it never carries credentials. A preflight for one of your mocked endpoints reaches your filters with <span class="inline_code">isCorsPreflight()</span> true, so a filter that checks credentials should let it through, as the example above does; otherwise the browser never sends the real request. A preflight for a control-plane path, such as one a browser-based client sends before calling <span class="inline_code">/mockserver/expectation</span>, is answered by MockServer's control-plane CORS rules and never reaches a filter.</li>
+    <li><strong>HTTP/3 status and readiness checks.</strong> Over HTTP/3, MockServer does not answer <span class="inline_code">/mockserver/status</span> and <span class="inline_code">/mockserver/ready</span> itself: they are matched against your expectations like any other request. So a filter sees them, and a filter that refuses requests without credentials refuses them too. Point health checks at MockServer's HTTP/1.1 or HTTP/2 port, or let those paths through in your filter. The same applies, on any protocol, to a <span class="inline_code">/mockserver/...</span> path that is not one of MockServer's own operations and so falls through to expectation matching.</li>
+    <li><strong>After-actions and logs see the response before transformers.</strong> The event log, verification, retrieved and recorded responses, the dashboard, OpenAPI response validation, metrics, traces, and an expectation's after-actions and webhooks all see the response as it was before the transformers changed it. An after-action can therefore fire, or a webhook be sent, for a response that a failing transformer then replaces with a <span class="inline_code">500</span>. What was actually sent is in the "response transformed by" log entry or, after a failure, in the warning.</li>
+    <li><strong>Where proxied requests go.</strong> A filter can change where MockServer sends a request it proxies, for example by changing the request's <span class="inline_code">socketAddress</span> to another host and port (whether it is sent over TLS still follows how the request arrived). MockServer does not stop a filter from sending requests to internal or cloud-metadata addresses unless you turn on <a href="/mock_server/configuration_properties.html#button_configuration_forward_proxy_block_private_networks"><span class="inline_code">forwardProxyBlockPrivateNetworks</span></a>, which is off by default; <a href="/mock_server/configuration_properties.html#button_configuration_forward_proxy_allowed_hosts"><span class="inline_code">forwardProxyAllowedHosts</span></a> and <a href="/mock_server/configuration_properties.html#button_configuration_forward_proxy_denied_hosts"><span class="inline_code">forwardProxyDeniedHosts</span></a>, also off by default, apply to these requests too. Turn them on if anyone you do not trust can influence what your filter does.</li>
+    <li><strong>Failures are visible.</strong> Every failure adds one warning to the MockServer log, with the correlation id, the extension, what failed and the response sent, if any. When <a href="/mock_server/configuration_properties.html#button_configuration_metrics_enabled">metrics</a> are on, failures are counted by <span class="inline_code">mock_server_extension_dataplane_failures</span> (labelled by extension, hook and type: <span class="inline_code">threw</span>, <span class="inline_code">timeout</span>, <span class="inline_code">null</span> or <span class="inline_code">contract_violation</span>), and requests refused because too many were running by <span class="inline_code">mock_server_overload_rejections</span> with <span class="inline_code">reason="extension_dataplane"</span>.</li>
+    <li><strong>Custom bodies.</strong> Filters and transformers are given copies, so a custom subclass of MockServer's <span class="inline_code">Body</span> must override <span class="inline_code">copy()</span>; a request or response with a body that cannot be copied fails the filter or transformer.</li>
+</ul>
+
+<p>A runnable version of both examples, with a test that starts MockServer with them loaded, is in <a href="https://github.com/mock-server/mockserver-monorepo/tree/master/examples/java/src/main/java/org/mockserver/examples/mockserver/extensions" target="_blank" rel="noopener noreferrer">examples/java</a>. Load them like any other extension, as described next.</p>
+
+<h2>Loading extensions</h2>
+
+<p>Name the extension classes in the <a href="/mock_server/configuration_properties.html#button_configuration_extensions"><span class="inline_code">extensions</span></a> property, as a comma-separated list, and put their JARs on MockServer's classpath.</p>
+
+<p><strong>Command line</strong> &mdash; <span class="inline_code">java -jar</span> ignores <span class="inline_code">-cp</span>, so start MockServer with its main class:</p>
+
+<pre class="prettyprint lang-bash code">
+java -cp mockserver-netty-jar-with-dependencies.jar:ext/* org.mockserver.cli.Main \
+  --port 1080 \
+  --extensions com.example.AuditExtension,com.example.SeedExtension
+</pre>
+
+<p><strong>System property, environment variable or property file</strong>:</p>
+
+<pre class="prettyprint lang-bash code">
+-Dmockserver.extensions=com.example.AuditExtension
+MOCKSERVER_EXTENSIONS=com.example.AuditExtension
+mockserver.extensions=com.example.AuditExtension
+</pre>
+
+<p><strong>Docker</strong> &mdash; every MockServer image adds every JAR in <span class="inline_code">/extensions</span> to the classpath, so mount a folder of extension JARs there, read-only, and set the property. This works the same in every image variant, including <span class="inline_code">-graaljs</span>, <span class="inline_code">-clustered</span> and <span class="inline_code">-aot</span>, and keeps the images' fast start-up. Use <span class="inline_code">/extensions</span> rather than <span class="inline_code">/libs</span>: the <span class="inline_code">-graaljs</span> and <span class="inline_code">-clustered</span> images ship their own JARs in <span class="inline_code">/libs</span>, so mounting over it breaks them.</p>
+
+<pre class="prettyprint lang-bash code">
+docker run -v "$(pwd)/ext:/extensions:ro" -e MOCKSERVER_EXTENSIONS=com.example.AuditExtension -p 1080:1080 mockserver/mockserver
+</pre>
+
+<p><strong>Helm</strong> &mdash; put the JARs in any Kubernetes volume (a ConfigMap, a Secret, a PersistentVolumeClaim, ...) and the chart mounts it read-only at <span class="inline_code">/extensions</span>:</p>
+
+<pre class="prettyprint lang-yaml code">
+extensions:
+  classes: "com.example.AuditExtension"
+  volume:
+    configMap:
+      name: mockserver-extensions
+</pre>
+
+<p><strong>Embedded Java</strong> &mdash; pass classes or suppliers. Each server you start gets its own instances, even when two servers share one <span class="inline_code">Configuration</span>:</p>
+
+<pre class="prettyprint lang-java code">
+ClientAndServer mockServer = ClientAndServer.startClientAndServer(
+    Configuration.configuration().extensions(AuditExtension.class),
+    1080
+);
+</pre>
+
+<p><strong>Spring</strong> &mdash; set the property on the test or on each named instance; each instance loads only the extensions it names:</p>
+
+<pre class="prettyprint lang-java code">
+@MockServerTest("mockserver.extensions=com.example.AuditExtension")
+
+@MockServerInstance(name = "orders", properties = "mockserver.extensions=com.example.AuditExtension")
+</pre>
+
+<p><strong>WAR</strong> &mdash; put the JARs in <span class="inline_code">WEB-INF/lib</span> and set the system property or <span class="inline_code">mockserver.properties</span>. <span class="inline_code">onStarted</span> is called once, when the servlet is created, with an empty list of ports.</p>
+
+<p><strong><a href="/mock_server/running_mock_server.html#in_process">In-process</a></strong> &mdash; pass them to <span class="inline_code">new InProcessMockServer(configuration().extensions(AuditExtension.class))</span>. They start when the instance is created and stop when it is closed. <span class="inline_code">onStarted</span> gets an empty list of ports, admin routes are reached by passing the request to <span class="inline_code">handle</span> and run on the calling thread with no timeout, and a <span class="inline_code">SettingsListener</span> is never called, because <span class="inline_code">PUT /mockserver/configuration</span> is not available in-process.</p>
+
+<p>To also load extensions listed in <span class="inline_code">META-INF/services/org.mockserver.extension.Extension</span> files on the classpath, turn on <a href="/mock_server/configuration_properties.html#button_configuration_extension_scanning"><span class="inline_code">extensionScanning</span></a>. It is off by default, so only the extensions you name are loaded.</p>
+
+<h2>When an extension fails</h2>
+
+<p>MockServer refuses to start, and the error names the extension, if:</p>
+<ul>
+    <li>an extension class cannot be found, does not implement <span class="inline_code">Extension</span>, or has no public no-argument constructor;</li>
+    <li>two extensions have the same name, or a name is not lower-case letters, digits and <span class="inline_code">-</span>;</li>
+    <li><span class="inline_code">start</span>, <span class="inline_code">onStarted</span> or, for a request filter or response transformer, <span class="inline_code">failOpen</span> throws, or does not return within <a href="/mock_server/configuration_properties.html#button_configuration_extension_start_timeout_millis"><span class="inline_code">extensionStartTimeoutMillis</span></a> (default 30 seconds);</li>
+    <li>a template helper is not a public interface with an implementation of it, two helpers of one extension share an interface name, or a Mustache helper key is not letters, digits, <span class="inline_code">_</span> or <span class="inline_code">-</span>;</li>
+    <li>an extension that seeds expectations throws from <span class="inline_code">initializeExpectations</span>. This is stricter than <span class="inline_code">initializationClass</span>, which only stops start-up when <span class="inline_code">failOnInitializationError</span> is set;</li>
+    <li>a file MockServer is set to write would land in the folder an extension was loaded from: persisted expectations (<span class="inline_code">persistExpectations</span>), persisted recorded expectations (<span class="inline_code">persistRecordedExpectations</span>), persisted recorded requests (<span class="inline_code">persistRecordedRequestsToDisk</span>), the audit log (<span class="inline_code">auditLogFile</span>) or the memory-usage CSV files (<span class="inline_code">outputMemoryUsageCsv</span>). Write them somewhere else, such as a separate volume. For an extension JAR this means the JAR's own folder, for example <span class="inline_code">/extensions</span>; for a folder of classes it means anywhere inside it.</li>
+</ul>
+
+<p>The extensions that had already started are stopped, in reverse order, and nothing else is left running, except the thread of an extension call that did not return in time: it is interrupted, and a warning says it may still be running. An exception thrown from <span class="inline_code">stop</span> is logged and the other extensions still stop.</p>
+
+<p><span class="inline_code">GET /mockserver/configuration</span> shows the configured extension names; a <span class="inline_code">PUT</span> that changes them is ignored with a warning in the log.</p>

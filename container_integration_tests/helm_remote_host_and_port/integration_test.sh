@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2155
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
+TEST_CASE="${TEST_CASE:-SCRIPT_DIR}"
+source "${SCRIPT_DIR}/../helm-deploy.sh"
+source "${SCRIPT_DIR}/../logging.sh"
+
+printMessage "Start: \"${SCRIPT_DIR/\//}\""
+
+function integration_test() {
+  # releasenameOverride pins the Service name to exactly "proxy-target".
+  #
+  # Without it the chart's "release.name" template appends the chart name unless the
+  # release name ALREADY CONTAINS it, so release "proxy-target" creates Service
+  # "proxy-target-mockserver". Two things in this test assume the Service is named
+  # "proxy-target", and both were therefore broken:
+  #   1. start-up port-forwards to svc/<namespace> — "services 'proxy-target' not found";
+  #   2. app.proxyRemoteHost below resolves proxy-target.proxy-target.svc.cluster.local,
+  #      which never existed either (this one was masked, because (1) fails first).
+  # The sibling helm tests avoid this only by accident: they use release names that
+  # happen to contain "mockserver" ("mockserver", "mockserver-cfg"), so the template
+  # collapses to the release name. Pinning the name explicitly does not rely on that
+  # coincidence.
+  start-up "--set image.repositoryNameAndTag=mockserver/mockserver:integration_testing --set service.port=1090 --set releasenameOverride=proxy-target" "proxy-target" "1090"
+  PROXY_TARGET="${MOCKSERVER_HOST}"
+  sleep 3
+  start-up "--set image.repositoryNameAndTag=mockserver/mockserver:integration_testing --set app.proxyRemoteHost=proxy-target.proxy-target.svc.cluster.local --set app.proxyRemotePort=1090"
+  TEST_EXIT_CODE=0
+  sleep 3
+  run-helm-test || TEST_EXIT_CODE=1
+  runCommand "curl -v -s -X PUT 'http://${PROXY_TARGET}/mockserver/expectation' -d \"{
+                'httpRequest' : {
+                  'path' : '/some/path'
+                },
+                'httpResponse' : {
+                  'body' : 'some_response_body'
+                }
+              }\"" || TEST_EXIT_CODE=1
+  if [[ "${TEST_EXIT_CODE}" == "0" ]]; then
+    RESPONSE_BODY=$(runCommand "curl -v -s -X PUT 'http://${MOCKSERVER_HOST}/some/path'")
+
+    if [[ "${RESPONSE_BODY}" != "some_response_body" ]]; then
+      printFailureMessage "Failed to retrieve response body for expectation matched by path, found: \"${RESPONSE_BODY}\""
+      TEST_EXIT_CODE=1
+    fi
+  fi
+  logTestResult "${TEST_EXIT_CODE}" "${TEST_CASE}" "proxy-target"
+  tear-down "proxy-target" "1090"
+  tear-down
+  return ${TEST_EXIT_CODE}
+}
+
+integration_test

@@ -1,0 +1,267 @@
+# Architecture
+
+> For detailed code architecture documentation, see the [Code Architecture docs](code/overview.md) which provide hierarchical coverage from high-level module structure down to individual subsystems.
+
+## Overview
+
+MockServer is a multi-module Maven project that provides an HTTP(S) mock server and proxy for testing. The server is built on Netty 4.2 and can be deployed as a standalone JAR, Docker container, WAR file, or embedded via JUnit/Spring integrations.
+
+```mermaid
+graph TB
+    subgraph "Client Layer"
+        JC[mockserver-client-java]
+        NC["mockserver-client-node
+monorepo: mockserver-client-node/"]
+        TC[mockserver-testcontainers]
+    end
+
+    subgraph "Server Layer"
+        MN["mockserver-netty
+Standalone server"]
+        MW["mockserver-war
+WAR deployment"]
+        MPW["mockserver-proxy-war
+WAR proxy"]
+        KW["mockserver-k8s-webhook
+K8s admission webhook"]
+    end
+
+    subgraph "Integration Layer"
+        JR["mockserver-junit-rule
+JUnit 4"]
+        JJ["mockserver-junit-jupiter
+JUnit 5"]
+        STL["mockserver-spring-test-listener
+Spring"]
+    end
+
+    subgraph "Core Layer"
+        MC["mockserver-core
+Domain model, matching, TLS"]
+        AS["mockserver-async
+AsyncAPI broker mocking"]
+    end
+
+    subgraph "State Backends"
+        SI["mockserver-state-infinispan
+Clustered state"]
+        BS3["mockserver-blob-s3"]
+        BGCS["mockserver-blob-gcs"]
+        BAZURE["mockserver-blob-azure"]
+    end
+
+    subgraph "Test Infrastructure"
+        MT["mockserver-testing
+Test utilities"]
+        MIT["mockserver-integration-testing
+Integration tests"]
+        ME["mockserver-examples
+Examples"]
+    end
+
+    JC --> MC
+    TC --> MC
+    MN --> MC
+    MN --> AS
+    MW --> MC
+    MPW --> MC
+    KW --> MC
+    SI --> MC
+    BS3 --> MC
+    BGCS --> MC
+    BAZURE --> MC
+    JR --> MN
+    JR --> JC
+    JJ --> MN
+    JJ --> JC
+    STL --> MN
+    STL --> JC
+    MIT --> MN
+    MIT --> MW
+    MIT --> MPW
+    ME --> MN
+```
+
+## Module Descriptions
+
+### mockserver-core
+
+The foundation module containing all shared logic:
+
+- **Domain model:** `HttpRequest`, `HttpResponse`, `Expectation`, `Action` (response, responseTemplate, responseClassCallback, responseObjectCallback, forward, forwardTemplate, forwardClassCallback, forwardObjectCallback, forwardReplace, forwardValidate, sseResponse, webSocketResponse, grpcStreamResponse, error) with multi-response support via `httpResponses` (sequential/random mode)
+- **Request matching:** body matchers (JSON, XML, regex, XPath, JSONPath, JSON Schema, XML Schema, GraphQL, OpenAPI), header/cookie/query matchers
+- **Serialisation:** Jackson-based JSON serialisation for all model objects
+- **TLS/SSL:** Dynamic certificate generation using BouncyCastle, CA management, mTLS support
+- **Templating:** Velocity, Mustache, and JavaScript response templates with built-in template helpers (jwt, strings, jsonTransform, dates, calc)
+- **Logging:** Structured event logging with SLF4J
+- **Configuration:** Property-based configuration system (`mockserver.properties`)
+- **OpenAPI:** Swagger/OpenAPI spec parsing and request matching
+- **Metrics:** Prometheus metrics export
+- **Control plane:** REST API handlers for expectation CRUD, verification, logging
+
+### mockserver-netty
+
+The primary server implementation:
+
+- **Netty pipeline:** HTTP/1.1, HTTP/2, HTTPS, SOCKS proxy, WebSocket, gRPC, SSE, and MCP (Model Context Protocol) support
+- **CLI:** `org.mockserver.cli.Main` — command-line entry point
+- **Proxy modes:** Port forwarding, HTTP proxy, HTTPS tunneling (CONNECT), SOCKS
+- **Packaging:** Fat JAR (`jar-with-dependencies`), shaded JAR, Debian package, Homebrew tarball
+- **Docker images:** Standard, snapshot, root, root-snapshot, and GraalJS (includes GraalJS JavaScript engine for JS templating)
+
+### mockserver-client-java
+
+Java client for interacting with a running MockServer instance:
+
+- `MockServerClient` — fluent API for creating expectations, verifying requests, resetting state
+- HTTP-based communication with the MockServer REST API
+
+### mockserver-war / mockserver-proxy-war
+
+WAR-packaged deployments for servlet containers (Tomcat, Jetty, etc.):
+
+- `mockserver-war` — mock server as a WAR
+- `mockserver-proxy-war` — proxy-only WAR
+
+### mockserver-junit-rule
+
+JUnit 4 `@Rule` integration:
+
+- `MockServerRule` — starts/stops MockServer per test or per class
+- Auto-configures `MockServerClient`
+
+### mockserver-junit-jupiter
+
+JUnit 5 extension:
+
+- `MockServerExtension` — `@ExtendWith` annotation support
+- Parameter injection of `MockServerClient`
+
+### mockserver-spring-test-listener
+
+Spring Test integration:
+
+- `MockServerPropertyCustomizer` — auto-configures Spring properties with MockServer ports
+
+### mockserver-testing
+
+Shared test utilities:
+
+- Custom Hamcrest matchers
+- `PrintOutCurrentTestRunListener` — test progress reporter for Surefire
+
+### mockserver-integration-testing
+
+Integration test infrastructure:
+
+- Abstract base classes for HTTP/HTTPS integration tests
+- Client connection factories for various proxy modes
+- Shared test expectations and assertions
+
+### mockserver-examples
+
+Usage examples (sample code — **not** a published artifact and **not** a module of the
+`mockserver` reactor; lives at the repo root `examples/java/` and is built + tested standalone
+in CI right after the reactor `install`):
+
+- Docker Compose configuration samples (11 scenarios including mTLS)
+- Code examples referenced by the Jekyll documentation site
+
+### mockserver-async
+
+AsyncAPI broker mocking:
+
+- Parses AsyncAPI specifications to derive expected message schemas
+- Publishes mock messages to Kafka, MQTT, and AMQP brokers via `MessagePublisher` adapters
+- Orchestrated by `AsyncApiMockOrchestrator`
+
+### mockserver-testcontainers
+
+Testcontainers integration:
+
+- `MockServerContainer` — starts MockServer as a Testcontainers container for use in JVM tests
+- Simplifies lifecycle management and port mapping for container-based tests
+
+### mockserver-state-infinispan
+
+Infinispan-backed clustered state backend:
+
+- Implements the `StateBackend` SPI with Infinispan as the distributed store
+- Enables expectation and log-entry sharing across MockServer cluster nodes
+- Activated via `MOCKSERVER_STATE_BACKEND=infinispan`
+
+### mockserver-blob-s3 / mockserver-blob-gcs / mockserver-blob-azure
+
+Cloud blob storage backends for persisted expectations and recordings:
+
+- Each module implements the blob storage SPI for its respective cloud provider (AWS S3, Google Cloud Storage, Azure Blob Storage)
+- Allows expectations to be stored externally and shared across instances
+
+### mockserver-k8s-webhook
+
+Kubernetes admission webhook for automatic sidecar injection:
+
+- HTTPS webhook server (`WebhookServer`) that handles `AdmissionReview` requests
+- `SidecarPatchBuilder` generates the JSON Patch to inject the MockServer sidecar and init container into opted-in pods
+- Packaged as a fat JAR and published as `mockserver/mockserver-webhook` Docker image
+
+## Request Processing Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant N as Netty Pipeline
+    participant M as MockServer Handler
+    participant EM as Expectation Matcher
+    participant A as Action Handler
+
+    C->>N: HTTP Request
+    N->>N: SSL/TLS Handshake (if HTTPS)
+    N->>N: HTTP Decode
+    N->>M: HttpRequest object
+    M->>EM: Match against expectations
+    alt Match found
+        EM->>A: Execute action
+        alt Response Action
+            A->>M: HttpResponse
+        else Forward Action
+            A->>A: Forward to upstream
+            A->>M: Upstream response
+        else Callback Action
+            A->>A: Invoke callback class/closure
+            A->>M: Generated response
+        else Error Action
+            A->>M: Connection error/delay
+        end
+    else No match (proxy mode)
+        M->>M: Forward to original destination
+    end
+    M->>N: HttpResponse
+    N->>C: HTTP Response
+```
+
+## Package Structure
+
+The main Java package is `org.mockserver` with sub-packages:
+
+| Package | Module | Purpose |
+|---------|--------|---------|
+| `org.mockserver.model` | core | Domain objects (HttpRequest, HttpResponse, etc.) |
+| `org.mockserver.matchers` | core | Request matching logic |
+| `org.mockserver.mock` | core | Expectation storage and management |
+| `org.mockserver.serialization` | core | JSON serialisation/deserialisation |
+| `org.mockserver.codec` | core | Netty codec adapters |
+| `org.mockserver.configuration` | core | Configuration properties |
+| `org.mockserver.socket.tls` | core | TLS certificate generation |
+| `org.mockserver.templates` | core | Response templating (Velocity, Mustache, JS) |
+| `org.mockserver.openapi` | core | OpenAPI spec handling |
+| `org.mockserver.log` | core | Structured event logging |
+| `org.mockserver.cli` | netty | Command-line interface |
+| `org.mockserver.netty` | netty | Netty server bootstrap |
+| `org.mockserver.netty.proxy` | netty | Proxy implementations |
+| `org.mockserver.netty.grpc` | netty | gRPC-to-HTTP request/response conversion |
+| `org.mockserver.netty.mcp` | netty | MCP (Model Context Protocol) endpoint |
+| `org.mockserver.client` | client-java | MockServerClient API |
+| `org.mockserver.junit` | junit-rule | JUnit 4 Rule |
+| `org.mockserver.junit.jupiter` | junit-jupiter | JUnit 5 Extension |
+| `org.mockserver.springtest` | spring-test-listener | Spring integration |

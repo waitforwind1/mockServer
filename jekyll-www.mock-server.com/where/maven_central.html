@@ -1,0 +1,265 @@
+---
+title: Maven
+description: Add MockServer to Maven or Gradle with org.mock-server coordinates, including netty server, Java client, JUnit, Spring, and Maven plugin artifacts.
+layout: page
+pageOrder: 6
+section: 'Where'
+subsection: true
+sitemap:
+  priority: 0.6
+  changefreq: 'monthly'
+  lastmod: 2026-05-19T08:00:00+01:00
+---
+
+<h2>Maven Central &nbsp;&nbsp;<a target="_blank" href="https://central.sonatype.com/search?q=g:org.mock-server" rel="noopener noreferrer"><img src="https://img.shields.io/maven-central/v/org.mock-server/mockserver-netty.svg" alt="mockserver Maven Central version" style="max-width:100%;"></a>
+</h2>
+
+<p>MockServer publishes the following artifacts to Maven Central under the <code>org.mock-server</code> groupId. Each comes in two forms:</p>
+
+<ul>
+    <li><strong><code>-no-dependencies</code> form (RECOMMENDED)</strong> &mdash; the same code with its transitive dependencies bundled into the jar and relocated under <code>shaded_package.*</code>. This form declares <strong>zero transitive dependencies</strong> in its POM, so it cannot clash with versions of Netty, Jackson, Guava, Bouncy Castle, GraphQL Java, etc. that your project already uses, and it removes the noise from CVE scanners flagging unused transitive dependencies.
+        <br>A few packages are bundled <strong>without</strong> relocation, because they only work under their own names or are an API you share with MockServer: the SLF4J API (so MockServer logs through your logging setup), Velocity, Rhino, snappy-java and lz4-java. <code>mockserver-netty-no-dependencies</code> also bundles the <code>slf4j-jdk14</code> provider, relocated and unregistered, so SLF4J never reports it beside your own provider; MockServer uses it only when your project has no SLF4J provider (see <a href="/mock_server/debugging_issues.html#logging_with_api">configuring logging</a>).
+        <br>The JUnit and Spring integrations do not bundle the framework they plug into: <code>mockserver-junit-rule-no-dependencies</code> and <code>mockserver-integration-testing-no-dependencies</code> use your JUnit 4, <code>mockserver-junit-jupiter-no-dependencies</code> your JUnit Jupiter, and <code>mockserver-spring-test-listener-no-dependencies</code> your Spring (<code>spring-test</code> and <code>spring-context</code>). Their POMs list that framework as a <code>provided</code> dependency, which Maven and Gradle do not pass on, so they still add nothing to your dependency tree.</li>
+    <li><strong>Plain form</strong> &mdash; the unshaded jar with transitive dependencies declared in the POM. Use this only when you need to override a specific transitive version yourself.</li>
+</ul>
+
+<p><strong>Migrating from 5.15.x or earlier:</strong> the <code>&lt;classifier&gt;shaded&lt;/classifier&gt;</code> form was removed in 6.0.0. Replace it with the corresponding <code>-no-dependencies</code> artifactId (e.g. <code>mockserver-netty</code> with <code>&lt;classifier&gt;shaded&lt;/classifier&gt;</code> &rarr; <code>mockserver-netty-no-dependencies</code>). The <code>-no-dependencies</code> artifacts have always been the preferred form and produce the same bytes.</p>
+
+<h3>Artifact summary</h3>
+
+<table>
+    <thead><tr><th>Use case</th><th>Recommended artifactId</th></tr></thead>
+    <tbody>
+        <tr><td>Embed a MockServer JVM instance in your tests or app</td><td><code>mockserver-netty-no-dependencies</code></td></tr>
+        <tr><td>Talk to a running MockServer from Java code</td><td><code>mockserver-client-java-no-dependencies</code></td></tr>
+        <tr><td>JUnit 4 <code>@Rule</code> that starts MockServer per-test</td><td><code>mockserver-junit-rule-no-dependencies</code></td></tr>
+        <tr><td>JUnit 5 extension that starts MockServer per-test</td><td><code>mockserver-junit-jupiter-no-dependencies</code></td></tr>
+        <tr><td>Spring <code>TestExecutionListener</code> integration</td><td><code>mockserver-spring-test-listener-no-dependencies</code></td></tr>
+        <tr><td>Shared integration-test helpers</td><td><code>mockserver-integration-testing-no-dependencies</code></td></tr>
+        <tr><td>Start/stop MockServer from a Maven build</td><td><code>mockserver-maven-plugin</code></td></tr>
+        <tr><td>Deploy MockServer to a servlet container (mock mode)</td><td><code>mockserver-war</code></td></tr>
+        <tr><td>Deploy MockServer to a servlet container (proxy mode)</td><td><code>mockserver-proxy-war</code></td></tr>
+        <tr><td>Run MockServer from a single executable jar</td><td><code>mockserver-netty:jar-with-dependencies</code></td></tr>
+        <tr><td>Align all MockServer module versions</td><td><code>mockserver-bom</code> (import)</td></tr>
+    </tbody>
+</table>
+
+<a id="mockserver_bom" class="anchor" href="#mockserver_bom">&nbsp;</a>
+<h3>mockserver-bom &mdash; Bill of Materials (version alignment)</h3>
+
+<p>Import <code>mockserver-bom</code> to keep the MockServer modules you use on one, mutually consistent version: declare any MockServer artifact without repeating its version. The BOM manages <strong>only</strong> MockServer's own <code>org.mock-server</code> modules &mdash; it does <strong>not</strong> pin the third-party libraries MockServer relies on internally (Jackson, Netty, Guava, Nimbus, &hellip;), so importing it never changes the versions <em>or</em> scopes your project resolves for those shared libraries. (If you use the <code>-no-dependencies</code> form there are no MockServer transitive dependencies to align, so the BOM is rarely needed.)</p>
+
+<p><strong>Strict version alignment.</strong> If your build enforces a single version of every dependency &mdash; for example the Maven Enforcer <a target="_blank" href="https://maven.apache.org/enforcer/enforcer-rules/dependencyConvergence.html" rel="noopener noreferrer"><code>dependencyConvergence</code></a> rule &mdash; importing <code>mockserver-bom</code> will <em>not</em> converge MockServer's third-party transitive versions for you (earlier releases did pin them, but that silently overrode consumers' own dependency versions and scopes, so it was removed). Manage those third-party versions yourself, or import each upstream project's own BOM.</p>
+
+<p>Maven &mdash; import the BOM in <code>dependencyManagement</code>, then declare MockServer artifacts without a version:</p>
+
+<pre><code class="code xml">&lt;<span class="element">dependencyManagement</span>&gt;
+    &lt;<span class="element">dependencies</span>&gt;
+        &lt;<span class="element">dependency</span>&gt;
+            &lt;<span class="element">groupId</span>&gt;<span class="element_value">org.mock-server</span>&lt;/<span class="element">groupId</span>&gt;
+            &lt;<span class="element">artifactId</span>&gt;<span class="element_value">mockserver-bom</span>&lt;/<span class="element">artifactId</span>&gt;
+            &lt;<span class="element">version</span>&gt;<span class="element_value">{{ site.mockserver_version }}</span>&lt;/<span class="element">version</span>&gt;
+            &lt;<span class="element">type</span>&gt;<span class="element_value">pom</span>&lt;/<span class="element">type</span>&gt;
+            &lt;<span class="element">scope</span>&gt;<span class="element_value">import</span>&lt;/<span class="element">scope</span>&gt;
+        &lt;/<span class="element">dependency</span>&gt;
+    &lt;/<span class="element">dependencies</span>&gt;
+&lt;/<span class="element">dependencyManagement</span>&gt;</code></pre>
+
+<p>Gradle &mdash; use the platform dependency:</p>
+
+<pre><code class="code"><span class="final">testImplementation</span>(<span class="final">platform</span>(<span class="string_literal">"org.mock-server:mockserver-bom:{{ site.mockserver_version }}"</span>))</code></pre>
+
+<a id="mockserver_netty" class="anchor" href="#mockserver_netty">&nbsp;</a>
+<h3>mockserver-netty &mdash; embedded server</h3>
+
+<p>The Netty-based HTTP(S) server for mocking and proxying. Use this when you want a MockServer instance running inside your test JVM or application.</p>
+
+<p>Maven:</p>
+
+<pre><code class="code xml">&lt;<span class="element">dependency</span>&gt;
+    &lt;<span class="element">groupId</span>&gt;<span class="element_value">org.mock-server</span>&lt;/<span class="element">groupId</span>&gt;
+    &lt;<span class="element">artifactId</span>&gt;<span class="element_value">mockserver-netty-no-dependencies</span>&lt;/<span class="element">artifactId</span>&gt;
+    &lt;<span class="element">version</span>&gt;<span class="element_value">{{ site.mockserver_version }}</span>&lt;/<span class="element">version</span>&gt;
+    &lt;<span class="element">scope</span>&gt;<span class="element_value">test</span>&lt;/<span class="element">scope</span>&gt;
+&lt;/<span class="element">dependency</span>&gt;</code></pre>
+
+<p>Gradle:</p>
+
+<pre><code class="code"><span class="final">testImplementation</span>(<span class="string_literal">"org.mock-server:mockserver-netty-no-dependencies:{{ site.mockserver_version }}"</span>)</code></pre>
+
+<p>Variants:</p>
+
+<ul>
+    <li><code>org.mock-server:mockserver-netty-no-dependencies:{{ site.mockserver_version }}</code> &mdash; shaded, zero transitive dependencies (<strong>recommended</strong>)</li>
+    <li><code>org.mock-server:mockserver-netty:{{ site.mockserver_version }}</code> &mdash; unshaded, transitive dependencies declared in the POM</li>
+    <li><code>org.mock-server:mockserver-netty:{{ site.mockserver_version }}:jar-with-dependencies</code> &mdash; single executable jar (for running MockServer from the command line via <code>java -jar</code>), cross-platform</li>
+    <li><code>org.mock-server:mockserver-netty:{{ site.mockserver_version }}:jar-with-dependencies-linux-x86_64</code> / <code>:jar-with-dependencies-linux-aarch_64</code> &mdash; intended for Linux, about 13 MB smaller than the cross-platform jar because each keeps only that one Linux architecture's native libraries (e.g. netty-tcnative, netty's epoll transport) instead of every supported OS/architecture. Not tested or supported on macOS or Windows: keep using the cross-platform <code>jar-with-dependencies</code> there.</li>
+</ul>
+
+<a id="mockserver_client_java" class="anchor" href="#mockserver_client_java">&nbsp;</a>
+<h3>mockserver-client-java &mdash; Java client</h3>
+
+<p>The Java client that talks to a running MockServer instance (either a local <code>ClientAndServer</code> or a remote one).</p>
+
+<pre><code class="code xml">&lt;<span class="element">dependency</span>&gt;
+    &lt;<span class="element">groupId</span>&gt;<span class="element_value">org.mock-server</span>&lt;/<span class="element">groupId</span>&gt;
+    &lt;<span class="element">artifactId</span>&gt;<span class="element_value">mockserver-client-java-no-dependencies</span>&lt;/<span class="element">artifactId</span>&gt;
+    &lt;<span class="element">version</span>&gt;<span class="element_value">{{ site.mockserver_version }}</span>&lt;/<span class="element">version</span>&gt;
+    &lt;<span class="element">scope</span>&gt;<span class="element_value">test</span>&lt;/<span class="element">scope</span>&gt;
+&lt;/<span class="element">dependency</span>&gt;</code></pre>
+
+<p>Variants:</p>
+
+<ul>
+    <li><code>org.mock-server:mockserver-client-java-no-dependencies:{{ site.mockserver_version }}</code> &mdash; shaded, zero transitive dependencies (<strong>recommended</strong>)</li>
+    <li><code>org.mock-server:mockserver-client-java:{{ site.mockserver_version }}</code> &mdash; unshaded</li>
+</ul>
+
+<a id="mockserver_junit_rule" class="anchor" href="#mockserver_junit_rule">&nbsp;</a>
+<h3>mockserver-junit-rule &mdash; JUnit 4 integration</h3>
+
+<p>A <a href="/mock_server/running_mock_server.html#junit_rule">JUnit 4 <code>@Rule</code></a> that starts MockServer on a free port before each test and stops it after.</p>
+
+<pre><code class="code xml">&lt;<span class="element">dependency</span>&gt;
+    &lt;<span class="element">groupId</span>&gt;<span class="element_value">org.mock-server</span>&lt;/<span class="element">groupId</span>&gt;
+    &lt;<span class="element">artifactId</span>&gt;<span class="element_value">mockserver-junit-rule-no-dependencies</span>&lt;/<span class="element">artifactId</span>&gt;
+    &lt;<span class="element">version</span>&gt;<span class="element_value">{{ site.mockserver_version }}</span>&lt;/<span class="element">version</span>&gt;
+    &lt;<span class="element">scope</span>&gt;<span class="element_value">test</span>&lt;/<span class="element">scope</span>&gt;
+&lt;/<span class="element">dependency</span>&gt;</code></pre>
+
+<p>Variants:</p>
+
+<ul>
+    <li><code>org.mock-server:mockserver-junit-rule-no-dependencies:{{ site.mockserver_version }}</code> (<strong>recommended</strong>)</li>
+    <li><code>org.mock-server:mockserver-junit-rule:{{ site.mockserver_version }}</code></li>
+</ul>
+
+<a id="mockserver_junit_jupiter" class="anchor" href="#mockserver_junit_jupiter">&nbsp;</a>
+<h3>mockserver-junit-jupiter &mdash; JUnit 5 integration</h3>
+
+<p>A <a href="/mock_server/running_mock_server.html#junit_rule">JUnit 5 test extension</a> that starts MockServer for tests annotated with <code>@MockServerSettings</code> and <code>@ExtendWith(MockServerExtension.class)</code>.</p>
+
+<pre><code class="code xml">&lt;<span class="element">dependency</span>&gt;
+    &lt;<span class="element">groupId</span>&gt;<span class="element_value">org.mock-server</span>&lt;/<span class="element">groupId</span>&gt;
+    &lt;<span class="element">artifactId</span>&gt;<span class="element_value">mockserver-junit-jupiter-no-dependencies</span>&lt;/<span class="element">artifactId</span>&gt;
+    &lt;<span class="element">version</span>&gt;<span class="element_value">{{ site.mockserver_version }}</span>&lt;/<span class="element">version</span>&gt;
+    &lt;<span class="element">scope</span>&gt;<span class="element_value">test</span>&lt;/<span class="element">scope</span>&gt;
+&lt;/<span class="element">dependency</span>&gt;</code></pre>
+
+<p>Variants:</p>
+
+<ul>
+    <li><code>org.mock-server:mockserver-junit-jupiter-no-dependencies:{{ site.mockserver_version }}</code> (<strong>recommended</strong>)</li>
+    <li><code>org.mock-server:mockserver-junit-jupiter:{{ site.mockserver_version }}</code></li>
+</ul>
+
+<a id="mockserver_spring_test_listener" class="anchor" href="#mockserver_spring_test_listener">&nbsp;</a>
+<h3>mockserver-spring-test-listener &mdash; Spring integration</h3>
+
+<p>A <a href="/mock_server/running_mock_server.html#spring_test_exec_listener">Spring <code>TestExecutionListener</code></a> that starts MockServer for tests in Spring projects.</p>
+
+<pre><code class="code xml">&lt;<span class="element">dependency</span>&gt;
+    &lt;<span class="element">groupId</span>&gt;<span class="element_value">org.mock-server</span>&lt;/<span class="element">groupId</span>&gt;
+    &lt;<span class="element">artifactId</span>&gt;<span class="element_value">mockserver-spring-test-listener-no-dependencies</span>&lt;/<span class="element">artifactId</span>&gt;
+    &lt;<span class="element">version</span>&gt;<span class="element_value">{{ site.mockserver_version }}</span>&lt;/<span class="element">version</span>&gt;
+    &lt;<span class="element">scope</span>&gt;<span class="element_value">test</span>&lt;/<span class="element">scope</span>&gt;
+&lt;/<span class="element">dependency</span>&gt;</code></pre>
+
+<p>Variants:</p>
+
+<ul>
+    <li><code>org.mock-server:mockserver-spring-test-listener-no-dependencies:{{ site.mockserver_version }}</code> (<strong>recommended</strong>)</li>
+    <li><code>org.mock-server:mockserver-spring-test-listener:{{ site.mockserver_version }}</code></li>
+</ul>
+
+<a id="mockserver_integration_testing" class="anchor" href="#mockserver_integration_testing">&nbsp;</a>
+<h3>mockserver-integration-testing &mdash; shared test helpers</h3>
+
+<p>A library of integration-test helpers (assertion utilities, fixtures, shared base classes) used to test MockServer itself and that can be reused in downstream test suites.</p>
+
+<pre><code class="code xml">&lt;<span class="element">dependency</span>&gt;
+    &lt;<span class="element">groupId</span>&gt;<span class="element_value">org.mock-server</span>&lt;/<span class="element">groupId</span>&gt;
+    &lt;<span class="element">artifactId</span>&gt;<span class="element_value">mockserver-integration-testing-no-dependencies</span>&lt;/<span class="element">artifactId</span>&gt;
+    &lt;<span class="element">version</span>&gt;<span class="element_value">{{ site.mockserver_version }}</span>&lt;/<span class="element">version</span>&gt;
+    &lt;<span class="element">scope</span>&gt;<span class="element_value">test</span>&lt;/<span class="element">scope</span>&gt;
+&lt;/<span class="element">dependency</span>&gt;</code></pre>
+
+<p>Variants:</p>
+
+<ul>
+    <li><code>org.mock-server:mockserver-integration-testing-no-dependencies:{{ site.mockserver_version }}</code> (<strong>recommended</strong>)</li>
+    <li><code>org.mock-server:mockserver-integration-testing:{{ site.mockserver_version }}</code></li>
+</ul>
+
+<a id="mockserver_maven_plugin" class="anchor" href="#mockserver_maven_plugin">&nbsp;</a>
+<h3>mockserver-maven-plugin &mdash; Maven plugin</h3>
+
+<p>A Maven plugin to start, stop, and fork MockServer as part of the build lifecycle &mdash; useful for binding MockServer to <code>pre-integration-test</code> / <code>post-integration-test</code> phases.</p>
+
+<pre><code class="code xml">&lt;<span class="element">plugin</span>&gt;
+    &lt;<span class="element">groupId</span>&gt;<span class="element_value">org.mock-server</span>&lt;/<span class="element">groupId</span>&gt;
+    &lt;<span class="element">artifactId</span>&gt;<span class="element_value">mockserver-maven-plugin</span>&lt;/<span class="element">artifactId</span>&gt;
+    &lt;<span class="element">version</span>&gt;<span class="element_value">{{ site.mockserver_version }}</span>&lt;/<span class="element">version</span>&gt;
+    &lt;<span class="element">configuration</span>&gt;
+        &lt;<span class="element">serverPort</span>&gt;<span class="element_value">1080</span>&lt;/<span class="element">serverPort</span>&gt;
+        &lt;<span class="element">pipeLogToConsole</span>&gt;<span class="element_value">true</span>&lt;/<span class="element">pipeLogToConsole</span>&gt;
+    &lt;/<span class="element">configuration</span>&gt;
+&lt;/<span class="element">plugin</span>&gt;</code></pre>
+
+<a id="mockserver_war" class="anchor" href="#mockserver_war">&nbsp;</a>
+<h3>mockserver-war / mockserver-proxy-war &mdash; servlet WARs</h3>
+
+<p>Deployable WAR archives for hosting MockServer (in mock mode or proxy mode) on any servlet container.</p>
+
+<ul>
+    <li><a target="_blank" href="https://search.maven.org/artifact/org.mock-server/mockserver-war" rel="noopener noreferrer">mockserver-war</a> &mdash; <a target="_blank" href="https://search.maven.org/remotecontent?filepath=org/mock-server/mockserver-war/{{ site.mockserver_version }}/mockserver-war-{{ site.mockserver_version }}.war" rel="noopener noreferrer">download .war</a></li>
+    <li><a target="_blank" href="https://search.maven.org/artifact/org.mock-server/mockserver-proxy-war" rel="noopener noreferrer">mockserver-proxy-war</a> &mdash; <a target="_blank" href="https://search.maven.org/remotecontent?filepath=org/mock-server/mockserver-proxy-war/{{ site.mockserver_version }}/mockserver-proxy-war-{{ site.mockserver_version }}.war" rel="noopener noreferrer">download .war</a></li>
+</ul>
+
+<a id="sonatype_snapshot" class="anchor" href="#sonatype_snapshot">&nbsp;</a>
+
+<h2>Sonatype SNAPSHOT</h2>
+
+<p>Pre-release SNAPSHOT builds are published to the Sonatype Central Portal snapshot repository at <a target="_blank" href="https://central.sonatype.com/repository/maven-snapshots/org/mock-server/" rel="noopener noreferrer">https://central.sonatype.com/repository/maven-snapshots/org/mock-server/</a>.</p>
+
+<h3>Maven</h3>
+
+<p>Add the snapshot repository to your <code>~/.m2/settings.xml</code> (preferred) or to the project <code>pom.xml</code>:</p>
+
+<pre><code class="code xml">&lt;<span class="element">profile</span>&gt;
+    &lt;<span class="element">id</span>&gt;<span class="element_value">sonatype</span>&lt;/<span class="element">id</span>&gt;
+    &lt;<span class="element">activation</span>&gt;
+        &lt;<span class="element">activeByDefault</span>&gt;<span class="element_value">true</span>&lt;/<span class="element">activeByDefault</span>&gt;
+    &lt;/<span class="element">activation</span>&gt;
+    &lt;<span class="element">repositories</span>&gt;
+        &lt;<span class="element">repository</span>&gt;
+            &lt;<span class="element">id</span>&gt;<span class="element_value">central-portal-snapshots</span>&lt;/<span class="element">id</span>&gt;
+            &lt;<span class="element">name</span>&gt;<span class="element_value">Sonatype Central Portal snapshots</span>&lt;/<span class="element">name</span>&gt;
+            &lt;<span class="element">url</span>&gt;<span class="element_value">https://central.sonatype.com/repository/maven-snapshots/</span>&lt;/<span class="element">url</span>&gt;
+            &lt;<span class="element">releases</span>&gt;
+                &lt;<span class="element">enabled</span>&gt;<span class="element_value">false</span>&lt;/<span class="element">enabled</span>&gt;
+            &lt;/<span class="element">releases</span>&gt;
+            &lt;<span class="element">snapshots</span>&gt;
+                &lt;<span class="element">enabled</span>&gt;<span class="element_value">true</span>&lt;/<span class="element">enabled</span>&gt;
+            &lt;/<span class="element">snapshots</span>&gt;
+        &lt;/<span class="element">repository</span>&gt;
+    &lt;/<span class="element">repositories</span>&gt;
+&lt;/<span class="element">profile</span>&gt;</code></pre>
+
+<p>Then reference the SNAPSHOT version directly. The <code>-no-dependencies</code> artifacts are recommended here too:</p>
+
+<pre><code class="code xml">&lt;<span class="element">dependency</span>&gt;
+    &lt;<span class="element">groupId</span>&gt;<span class="element_value">org.mock-server</span>&lt;/<span class="element">groupId</span>&gt;
+    &lt;<span class="element">artifactId</span>&gt;<span class="element_value">mockserver-netty-no-dependencies</span>&lt;/<span class="element">artifactId</span>&gt;
+    &lt;<span class="element">version</span>&gt;<span class="element_value">{{ site.mockserver_snapshot_version }}</span>&lt;/<span class="element">version</span>&gt;
+&lt;/<span class="element">dependency</span>&gt;</code></pre>
+
+<h3>Gradle</h3>
+
+<pre><code class="code"><span class="final">repositories</span> {
+    <span class="final">maven</span> { <span class="final">url</span> <span class="string_literal">"https://central.sonatype.com/repository/maven-snapshots/"</span> }
+}
+
+<span class="final">dependencies</span> {
+    <span class="final">testImplementation</span>(<span class="string_literal">"org.mock-server:mockserver-netty-no-dependencies:{{ site.mockserver_snapshot_version }}"</span>)
+}</code></pre>

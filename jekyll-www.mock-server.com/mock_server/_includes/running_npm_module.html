@@ -1,0 +1,200 @@
+<p>The node module can be used to start and stop MockServer as a node module or as a Grunt plugin.</p>
+
+<p>You may install this plugin / node module with the following command:</p>
+
+<pre><code class="code">npm install mockserver-node --save-dev</code></pre>
+
+<p><strong>Node Module</strong></p>
+
+<p>To start or stop the MockServer from any Node.js code you need to import this module using <span class="inline_code">require(<span class="string_literal">'mockserver-node'</span>)</span> as follows:</p>
+
+<pre><code class="code">var mockserver = require(<span class="string_literal">'mockserver-node'</span>);</code></pre>
+
+<p>Then you can use either the <span class="inline_code">start_mockserver</span> or <span class="inline_code">stop_mockserver</span> functions as follows:</p>
+
+<pre><code class="code">var mockserver = require(<span class="string_literal">'mockserver-node'</span>);
+mockserver.start_mockserver({
+                serverPort: <span class="numeric_literal">1080</span>,
+                verbose: <span class="keyword">true</span>,
+                trace: <span class="keyword">true</span>
+            });
+
+<span class="comment">// do something</span>
+
+mockserver.stop_mockserver({
+                serverPort: <span class="numeric_literal">1080</span>
+            });</code></pre>
+
+<p>You can customize the JVM arguments and set <a href="/mock_server/configuration_properties.html">configuration</a> options as follows</p>
+
+<pre><code class="code">var mockserver = require(<span class="string_literal">'mockserver-node'</span>);
+mockserver.start_mockserver({
+              serverPort: <span class="numeric_literal">1080</span>,
+              jvmOptions: [
+                  <span class="string_literal">'-Dmockserver.enableCORSForAllResponses=true'</span>,
+                  <span class="string_literal">'-Dmockserver.corsAllowMethods="CONNECT, DELETE, GET, HEAD, OPTIONS, POST, PUT, PATCH, TRACE"'</span>,
+                  <span class="string_literal">'-Dmockserver.corsAllowHeaders="Allow, Content-Encoding, Content-Length, Content-Type, ETag, Expires, Last-Modified, Location, Server, Vary, Authorization"'</span>,
+                  <span class="string_literal">'-Dmockserver.corsAllowCredentials=true'</span>,
+                  <span class="string_literal">'-Dmockserver.corsMaxAgeInSeconds=300'</span>
+              ],
+              mockServerVersion: <span class="string_literal">"{{ site.mockserver_version }}"</span>,
+              verbose: <span class="keyword">true</span>
+          });</code></pre>
+
+
+<p>MockServer uses port unification to support HTTP, HTTPS, SOCKS, HTTP CONNECT, Port Forwarding Proxying on the same port. A client can then connect to the single port with both HTTP and HTTPS as the socket will automatically detected SSL traffic and decrypt it when required.</p>
+
+<p><strong>Requirements</strong></p>
+
+<p><span class="inline_code">start_mockserver</span> runs MockServer with the <span class="inline_code">java</span> command, so Java 17 or later must be installed and its <span class="inline_code">bin</span> directory must be on the <span class="inline_code">PATH</span> of the Node.js process. <span class="inline_code">JAVA_HOME</span> is not used, and there is no option for the location of <span class="inline_code">java</span>.</p>
+
+<p><strong>When a start fails</strong></p>
+
+<p><span class="inline_code">start_mockserver</span> returns a promise. It is rejected with an <span class="inline_code">Error</span>, and the same message is printed to stderr, when:</p>
+
+<ul>
+	<li>there is no <span class="inline_code">java</span> on the <span class="inline_code">PATH</span> (<span class="inline_code">error.code</span> is <span class="inline_code">ENOENT</span>), or the one found cannot be run (<span class="inline_code">EACCES</span>): the message says where <span class="inline_code">java</span> was looked for</li>
+	<li><span class="inline_code">java</span> exits with a failing status, or is ended by a signal, before MockServer is ready, for example when <span class="inline_code">jvmOptions</span> holds an option it does not accept: the start fails at once and the message ends with the last lines the process printed</li>
+	<li>MockServer does not become ready in the time <span class="inline_code">startupRetries</span> allows</li>
+</ul>
+
+<p>A failed start never ends the calling process, and leaves it free to carry on or to exit (unless a JVM was left waiting for a debugger, see <span class="inline_code">javaDebugPort</span>). Handle the rejection to fail your own script, and call <span class="inline_code">stop_mockserver</span> afterwards if you wish: it resolves when nothing is running.</p>
+
+<pre><code class="code">mockserver.start_mockserver({serverPort: <span class="numeric_literal">1080</span>}).then(<span class="keyword">function</span> () {
+    <span class="comment">// MockServer is ready</span>
+}, <span class="keyword">function</span> (error) {
+    process.exitCode = <span class="numeric_literal">1</span>;
+});</code></pre>
+
+<p><strong>TypeScript</strong></p>
+
+<p>TypeScript typings for <span class="inline_code">mockserver-node</span> are published in the npm package. They use Node's own types, so your project needs <span class="inline_code">@types/node</span> installed. Both <span class="inline_code">import mockserver = require('mockserver-node')</span> and <span class="inline_code">import * as mockserver from 'mockserver-node'</span> work with or without <span class="inline_code">esModuleInterop</span>; a default import (<span class="inline_code">import mockserver from 'mockserver-node'</span>) needs <span class="inline_code">esModuleInterop</span> turned on and is otherwise a compile error.</p>
+
+<p><strong>Note:</strong> the package declares an <span class="inline_code">exports</span> map, naming <span class="inline_code">index</span>, <span class="inline_code">downloadJar</span>, <span class="inline_code">downloadBinary</span> and <span class="inline_code">package.json</span>. A deep import of a path it doesn't name &mdash; for example <span class="inline_code">mockserver-node/tasks/mockServer.js</span> &mdash; now fails with <span class="inline_code">ERR_PACKAGE_PATH_NOT_EXPORTED</span>, where previously any file inside the package could be required.</p>
+
+<p><strong>Grunt Plugin</strong></p>
+
+<p>If you haven't used Grunt before, be sure to check out the Getting Started guide, as it explains how to create a Gruntfile as well as install and use Grunt plugins.</p>
+
+<p>In your project's Gruntfile, add a section named <span class="inline_code">start_mockserver</span> and <span class="inline_code">stop_mockserver</span> to the data object passed into <span class="inline_code">grunt.initConfig()</span>.</p>
+
+<p>The following example starts a MockServer on port <strong>1080</strong> (with a matching task to stop it again).</p>
+
+<pre><code class="code">grunt.initConfig({
+    start_mockserver: {
+        start: {
+            options: {
+                serverPort: <span class="numeric_literal">1080</span>,
+                trace: <span class="keyword">true</span>
+            }
+        }
+    },
+    stop_mockserver: {
+        stop: {
+            options: {
+                serverPort: <span class="numeric_literal">1080</span>
+            }
+        }
+    }
+});
+
+grunt.loadNpmTasks(<span class="string_literal">'mockserver-node'</span>);</code></pre>
+
+<p><strong>Request Log</strong></p>
+
+The request log will only be captured in MockServer if the log level is <span class="inline_code">INFO</span> (or more verbose, i.e. <span class="inline_code">DEBUG</span> or <span class="inline_code">TRACE</span>) therefore to capture the request log and use the <span class="inline_code">/retrieve</span> endpoint ensure either the option <span class="inline_code">trace: <span class="keyword">true</span></span> or the command line switch <span class="inline_code">--verbose</span> is set.
+
+<p><strong>Grunt Plugin & NPM Module Options</strong></p>
+
+<p><span class="inline_code"><strong>options.serverPort</strong></span></p>
+
+<p><strong>Type:</strong> Integer <strong>Default:</strong> undefined</p>
+
+<p>The HTTP, HTTPS, SOCKS and HTTP CONNECT port(s) for both mocking and proxying requests. Port unification is used to support all protocols for proxying and mocking on the same port(s). Supports comma separated list for binding to multiple ports.</p>
+
+<p><span class="inline_code"><strong>options.proxyRemotePort</strong></span></p>
+
+<p><strong>Type:</strong> Integer <strong>Default:</strong> undefined</p>
+
+<p>Optionally enables port forwarding mode. When specified all requests received will be forwarded to the specified port, unless they match an expectation.</p>
+
+<p><span class="inline_code"><strong>options.proxyRemoteHost</strong></span></p>
+
+<p><strong>Type:</strong> String <strong>Default:</strong> undefined</p>
+
+<p>Specified the host to forward all proxy requests to when port forwarding mode has been enabled using the <span class="inline_code">proxyRemotePort</span> option. This setting is ignored unless <span class="inline_code">proxyRemotePort</span> has been specified. If no value is provided for <span class="inline_code">proxyRemoteHost</span> when <span class="inline_code">proxyRemotePort</span> has been specified, <span class="inline_code">proxyRemoteHost</span> will default to <span class="inline_code"><span class="string_literal">"localhost"</span></span>.</p>
+
+<p><span class="inline_code"><strong>options.artifactoryHost</strong></span></p>
+
+<p><strong>Type:</strong> String <strong>Default:</strong> oss.sonatype.org</p>
+
+<p>This value specifies the name of the artifact repository host.</p>
+
+<p><span class="inline_code"><strong>options.artifactoryPath</strong></span></p>
+
+<p><strong>Type:</strong> String <strong>Default:</strong> /content/repositories/releases/org/mock-server/mockserver-netty/</p>
+
+<p>This value specifies the path to the artifactory leading to the mockserver-netty jar with dependencies.</p>
+
+<p><span class="inline_code"><strong>options.mockServerVersion</strong></span></p>
+
+<p><strong>Type:</strong> String <strong>Default:</strong> {{ site.mockserver_version }}</p>
+
+<p>This value specifies the artifact version of MockServer to download.</p>
+
+<p><strong>Note:</strong> It is also possible to specify a SNAPSHOT version to get the latest unreleased changes.</p>
+
+<p><strong>Note:</strong> The jar is downloaded once and kept inside the installed <span class="inline_code">mockserver-node</span> module itself (i.e. <span class="inline_code">node_modules/mockserver-node</span>), not in the directory you run from, so it is re-used no matter where you start MockServer from and is removed when the module is uninstalled. Jars for different versions are kept side by side, so switching between versions does not re-download them; a SNAPSHOT version is always re-fetched, since its contents change without its version changing. If that directory is not writable — for example a global install owned by root but used by another user, or a read-only container layer — the jar is downloaded into the directory you run from instead.</p>
+
+<p><strong>Note:</strong> A download that receives nothing at all for 60 seconds is abandoned with an error rather than waiting indefinitely. A slow download is never interrupted, only a silent one, but if you are behind a proxy that pauses for longer than this before it starts sending, set the <span class="inline_code">MOCKSERVER_DOWNLOAD_IDLE_TIMEOUT_MILLIS</span> environment variable to a larger number of milliseconds.</p>
+
+<p><span class="inline_code"><strong>options.verbose</strong></span></p>
+
+<p><strong>Type:</strong> Boolean <strong>Default:</strong> false</p>
+
+<p>This value indicates whether the MockServer logs should be written to the console. In addition to logging additional output from the grunt task this options also sets the logging level of the MockServer to INFO. At INFO level all interactions with the MockServer including setting up expectations, matching expectations, clearing expectations and verifying requests are written to the log.</p>
+
+<p><strong>Note:</strong> It is also possible to use the <span class="inline_code">--verbose</span> command line switch to enabled verbose level logging from the command line.</p>
+
+<p><span class="inline_code"><strong>options.trace</strong></span></p>
+
+<p><strong>Type:</strong> Boolean <strong>Default:</strong> false</p>
+
+<p>This value sets the logging level of the MockServer to TRACE. At TRACE level (in addition to INFO level information) all matcher results, including when specific matchers fail (such as HeaderMatcher) are written to the log.</p>
+
+<p><span class="inline_code"><strong>options.javaDebugPort</strong></span></p>
+
+<p><strong>Type:</strong> Integer <strong>Default:</strong> undefined</p>
+
+<p>This value indicates whether Java debugging should be enabled and if so which port the debugger should listen on. When this options is provided the following additional option is passed to the JVM:</p>
+
+<pre><code class="code"><span class="string_literal">"-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address="</span> + javaDebugPort</code></pre>
+
+<p><strong>Note:</strong> <span class="inline_code">suspend=y</span> is used so the MockServer will pause until the debugger is attached. The grunt task will wait 50 seconds for the debugger to be attached before it exits with a failure status. The paused JVM is left running when that happens, so a debugger can still be attached to it; stop it yourself when you are done.</p>
+
+<p><span class="inline_code"><strong>options.runForked</strong></span></p>
+
+<p><strong>Type:</strong> Boolean <strong>Default:</strong> false</p>
+
+<p>If the calling process meets an uncaught exception, the MockServer it launched is ended so that it is not left running once the process has gone. The exception itself is left alone: Node.js reports it and exits with a failing status, or your own <span class="inline_code">uncaughtException</span> handler deals with it. The server is ended even when your own handler, or a test runner, deals with the exception and the process carries on. Only the <span class="inline_code">java</span> process the launcher started is signalled: if the <span class="inline_code">java</span> on your <span class="inline_code">PATH</span> is a wrapper script that does not <span class="inline_code">exec</span> the JVM, the JVM is left running. Set this option to <span class="inline_code">true</span> to leave MockServer running instead.</p>
+
+<p><span class="inline_code"><strong>options.jvmOptions</strong></span></p>
+
+<p><strong>Type:</strong> String <strong>Default:</strong> undefined</p>
+
+<p>This value allows any system properties to be passed to the JVM that runs MockServer, for example:</p>
+
+<pre><code class="code">start_mockserver: {
+    options: {
+        serverPort: <span class="numeric_literal">1080</span>,
+        jvmOptions: <span class="string_literal">"-Dmockserver.enableCORSForAllResponses=true"</span>
+    }
+}</code></pre>
+
+<p><span class="inline_code"><strong>options.startupRetries</strong></span></p>
+
+<p><strong>Type:</strong> Integer <strong>Default:</strong> if javaDebugPort is not set 110, but if javaDebugPort is set 500</p>
+
+<p>This value indicates the how many times we will call the check to confirm if the mock server started up correctly. It will default to 110 which will take about 11 seconds to complete, this is normally long enough for the server to startup. The server can take longer to start up if Java debugging is enabled so this will default to 500. The default will, in some cases, need to be overridden as the JVM may take longer to start up on some architectures,  e.g. Mac seems to take a little longer.</p>
+
+<p>The checks are 100 milliseconds apart, and each one waits up to 2 seconds for an answer. A check that gets no answer in that time uses up 20 further retries, so a server that accepts connections and never answers makes the start give up after about <span class="inline_code">startupRetries</span> &times; 100 milliseconds plus 2 seconds, much as one that refuses connections does. When the start gives up it fails with a message saying so and stops the JVM it launched, unless <span class="inline_code">javaDebugPort</span> is set.</p>

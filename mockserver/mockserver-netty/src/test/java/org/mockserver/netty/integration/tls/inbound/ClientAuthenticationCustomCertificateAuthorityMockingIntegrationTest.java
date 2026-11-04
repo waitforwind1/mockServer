@@ -1,0 +1,52 @@
+package org.mockserver.netty.integration.tls.inbound;
+
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
+import org.mockserver.cli.Main;
+import org.mockserver.client.MockServerClient;
+import org.mockserver.integration.ClientAndServer;
+import org.mockserver.socket.PortFactory;
+
+import static org.mockserver.configuration.ConfigurationProperties.*;
+import static org.mockserver.stop.Stop.stopQuietly;
+
+/**
+ * @author jamesdbloom
+ */
+public class ClientAuthenticationCustomCertificateAuthorityMockingIntegrationTest extends AbstractClientAuthenticationMockingIntegrationTest {
+
+    private static String originalCertificateAuthorityCertificate;
+    private static String originalCertificateAuthorityPrivateKey;
+    private static boolean originalTLSMutualAuthenticationRequired;
+
+    @BeforeClass
+    public static void startServer() {
+        // save original value
+        originalCertificateAuthorityCertificate = certificateAuthorityCertificate();
+        originalCertificateAuthorityPrivateKey = certificateAuthorityPrivateKey();
+        originalTLSMutualAuthenticationRequired = tlsMutualAuthenticationRequired();
+
+        // set new certificate authority values
+        certificateAuthorityCertificate("org/mockserver/netty/integration/tls/ca.pem");
+        certificateAuthorityPrivateKey("org/mockserver/netty/integration/tls/ca-key-pkcs8.pem");
+        tlsMutualAuthenticationRequired(true);
+
+        mockServerClient = ClientAndServer.startClientAndServer().withSecure(true);
+    }
+
+    @AfterClass
+    public static void stopServer() {
+        stopQuietly(mockServerClient);
+
+        // set back to original value
+        certificateAuthorityCertificate(originalCertificateAuthorityCertificate);
+        certificateAuthorityPrivateKey(originalCertificateAuthorityPrivateKey);
+        tlsMutualAuthenticationRequired(originalTLSMutualAuthenticationRequired);
+    }
+
+    @Override
+    public int getServerPort() {
+        return mockServerClient.getPort();
+    }
+
+}

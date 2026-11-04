@@ -1,0 +1,21 @@
+{
+  "httpRequest": {
+    "path": "/tmplm"
+  },
+  "httpResponseTemplate": {
+    "templateType": "MUSTACHE",
+    "template": "{\"statusCode\": 200, \"body\": \"{{request.path}}\"}",
+    "delay": {
+      "timeUnit": "SECONDS",
+      "value": 1
+    },
+    "primary": false,
+    "parameters": {
+      "greeting": "hello",
+      "names": ["ann", "bob"],
+      "limits": {
+        "max": 5
+      }
+    }
+  }
+}

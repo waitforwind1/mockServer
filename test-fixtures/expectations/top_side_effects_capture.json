@@ -1,0 +1,68 @@
+{
+  "namespace": "tenant-a",
+  "httpRequest": {
+    "path": "/side"
+  },
+  "httpResponse": {
+    "body": "ok"
+  },
+  "beforeActions": [
+    {
+      "httpRequest": {
+        "path": "/notify-before",
+        "method": "POST"
+      },
+      "blocking": true,
+      "timeout": {
+        "timeUnit": "SECONDS",
+        "value": 2
+      },
+      "failurePolicy": "FAIL_FAST",
+      "delay": {
+        "timeUnit": "MILLISECONDS",
+        "value": 1
+      }
+    }
+  ],
+  "afterActions": [
+    {
+      "httpClassCallback": {
+        "callbackClass": "org.mockserver.examples.AfterCallback"
+      },
+      "blocking": false,
+      "failurePolicy": "BEST_EFFORT"
+    },
+    {
+      "httpObjectCallback": {
+        "clientId": "audit-client"
+      }
+    },
+    {
+      "httpRequestTemplate": {
+        "templateType": "VELOCITY",
+        "template": "{ \"method\": \"POST\", \"path\": \"/notify-after/$!esc.url($request.headers['x-id'][0])\" }"
+      },
+      "delay": {
+        "timeUnit": "MILLISECONDS",
+        "value": 5
+      }
+    }
+  ],
+  "capture": [
+    {
+      "source": "jsonPath",
+      "expression": "$.orderId",
+      "into": "orderId"
+    },
+    {
+      "source": "header",
+      "expression": "X-Request-Id",
+      "into": "reqId"
+    },
+    {
+      "source": "pathParameter",
+      "expression": "cartId",
+      "into": "cart"
+    }
+  ]
+}

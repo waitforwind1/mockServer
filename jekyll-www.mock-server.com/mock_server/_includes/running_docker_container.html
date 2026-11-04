@@ -1,0 +1,329 @@
+The typical sequence for running the MockServer docker image is as follows:
+
+<ol>
+	<li><a href="#install_docker">Install Docker</a></li>
+	<li><a href="#pull_docker_image">Pull (or Update) Image</a></li>
+	<li><a href="#run_docker_container">Run Container</a></li>
+</ol>
+
+In addition it is possible to <a href="#docker_container_customization">customise how the container is run</a>.
+
+<a id="install_docker" class="anchor" href="#install_docker">&nbsp;</a>
+
+<h3>Install Docker</h3>
+
+<p>To install Docker see the <a target="_blank" href="https://docs.docker.com/installation/" rel="noopener noreferrer">installation instructions</a>.</p>
+
+<a id="pull_docker_image" class="anchor" href="#pull_docker_image">&nbsp;</a>
+
+<h3>Pull MockServer Image</h3>
+
+<p>To pull the MockServer Docker image use the pull command, as follows:</p>
+
+<pre><code class="code">docker pull mockserver/mockserver</code></pre>
+
+<p>This is not strictly necessary as the image will be automatically pulled if it does not exist when the run command is used. However, using the pull command will ensure the latest version of the image is downloaded.</p>
+
+<p>Docker Hub limits how many images anonymous users can pull, which often hits CI builds that share an IP address. The same images are also published to two other registries, and pulls from them do not count against the Docker Hub limit:</p>
+
+<ul>
+    <li><strong>GitHub Container Registry (GHCR)</strong>, a good choice for CI and especially for GitHub Actions:
+<pre><code class="code">docker pull ghcr.io/mock-server/mockserver:{{ site.mockserver_version }}</code></pre></li>
+    <li><strong>AWS ECR Public</strong>, which gives lower latency for AWS-based CI/CD:
+<pre><code class="code">docker pull public.ecr.aws/t2x9c0i6/mockserver:{{ site.mockserver_version }}</code></pre></li>
+</ul>
+
+<p>GHCR and ECR Public carry the same tags as Docker Hub (for example <span class="inline_code">latest</span>, <span class="inline_code">{{ site.mockserver_version }}</span>, <span class="inline_code">mockserver-{{ site.mockserver_version }}</span>, <span class="inline_code">{{ site.mockserver_version }}-graaljs</span> and <span class="inline_code">clustered-{{ site.mockserver_version }}</span>) and each tag has the <strong>same image digest</strong> on every registry, so switching registry changes nothing but where the image comes from. The Kubernetes admission webhook image is at <span class="inline_code">ghcr.io/mock-server/mockserver-webhook</span> and <span class="inline_code">public.ecr.aws/t2x9c0i6/mockserver-webhook</span>. On GHCR:</p>
+
+<ul>
+    <li>releases from 7.1.0 onwards are available; earlier versions are not</li>
+    <li>the experimental <span class="inline_code">-aot</span> tags and the <span class="inline_code">snapshot</span> tags are not published to GHCR; pull them from Docker Hub or ECR Public</li>
+</ul>
+
+<a id="verify_docker_image_signature" class="anchor" href="#verify_docker_image_signature">&nbsp;</a>
+
+<h3>Verifying Image Signatures</h3>
+
+<p>Release images are signed with <a target="_blank" href="https://docs.sigstore.dev/cosign/overview/" rel="noopener noreferrer">Sigstore cosign</a> using the MockServer public key, published at <a href="https://www.mock-server.com/mockserver-cosign.pub">https://www.mock-server.com/mockserver-cosign.pub</a> (the same key signs the Helm chart). To verify an image before running it:</p>
+
+<pre class="prettyprint code"><code class="code">cosign verify --key https://www.mock-server.com/mockserver-cosign.pub mockserver/mockserver:{{ site.mockserver_version }}</code></pre>
+
+<p>A successful verification prints the signed payload and exits with status <span class="keyword">0</span>. The same key verifies the <span class="inline_code">-graaljs</span>, <span class="inline_code">-http3</span> and <span class="inline_code">clustered-</span> image variants and the GHCR and ECR Public copies, for example <span class="inline_code">cosign verify --key https://www.mock-server.com/mockserver-cosign.pub ghcr.io/mock-server/mockserver:{{ site.mockserver_version }}</span>. Image versions before {{ site.mockserver_version }} predate signing.</p>
+
+<a id="run_docker_container" class="anchor" href="#run_docker_container">&nbsp;</a>
+
+<h3>Run MockServer Container</h3>
+
+<p>Then to run MockServer as a Docker container run the following command:</p>
+
+<pre><code class="code">docker run -d --rm -P mockserver/mockserver</code></pre>
+
+<p>The <strong>-P</strong> switch in this command tells Docker to map all ports exported by the MockServer container to dynamically allocated ports on the host machine.</p><p>To view information about the MockServer container, including which dynamic ports have been used run the following command:</p>
+
+<pre><code class="code">docker ps</code></pre>
+
+<h3>No Interactive Shell</h3>
+
+<p>MockServer uses <a target="_blank" href="https://github.com/GoogleContainerTools/distroless" rel="noopener noreferrer">distroless</a> as its based container for both size and security and so does not contain an interactive shell.  This minimises the likelihood of vulnerabilities and to reduces the attack surface by ensuring only the JVM and MockServer code is inside the container.</p>
+
+<a id="docker_detailed_configuration" class="anchor" href="#docker_detailed_configuration">&nbsp;</a>
+
+<a id="docker_container_customization" class="anchor" href="#docker_container_customization">&nbsp;</a>
+
+<h3>Configure Port Mapping</h3>
+
+<p>This MockServer docker container exports the following port:</p>
+
+<ul>
+	<li><strong>serverPort</strong> 1080</li>
+</ul>
+
+<p>To specify which ports (on the host machine) should be mapped to the MockServer docker container use the <strong>-p</strong> <span class="command_line_argument_placeholder">&lt;host port&gt;</span><strong>:</strong><span class="command_line_argument_placeholder">&lt;container port&gt;</span> option, as follows:</p>
+
+<pre><code class="code">docker run -d --rm -p <span class="command_line_argument_placeholder">&lt;serverPort&gt;</span>:<span class="numeric_literal">1080</span> mockserver/mockserver</code></pre>
+
+<p>For example:</p>
+
+<pre><code class="code">docker run -d --rm -p <span class="numeric_literal">1080</span>:<span class="numeric_literal">1080</span> mockserver/mockserver</code></pre>
+
+<a id="docker_http3" class="anchor" href="#docker_http3">&nbsp;</a>
+
+<h3>HTTP/3 (experimental)</h3>
+
+<p>The standard image serves <a href="/mock_server/http3.html">HTTP/3</a>: set <span class="inline_code">MOCKSERVER_HTTP3_PORT</span> and publish that port as <strong>UDP</strong>:</p>
+
+<pre><code class="code">docker run -d --rm -p <span class="numeric_literal">1080</span>:<span class="numeric_literal">1080</span> -p <span class="numeric_literal">8443</span>:<span class="numeric_literal">8443</span>/udp -e MOCKSERVER_HTTP3_PORT=<span class="numeric_literal">8443</span> mockserver/mockserver:{{ site.mockserver_version }}</code></pre>
+
+<p>This also works with a read-only root filesystem (<span class="inline_code">--read-only</span>). The <span class="inline_code">-graaljs</span>, <span class="inline_code">clustered-</span> and <span class="inline_code">-aot</span> images also serve HTTP/3, but only if the container can write to <span class="inline_code">/tmp</span>. If MockServer cannot start HTTP/3 on that port &mdash; for example with <span class="inline_code">--network host</span> when another process already holds the UDP port &mdash; it exits with a non-zero status, printing one line that names the port and the cause, rather than running without HTTP/3.</p>
+
+<p><strong>Deprecated:</strong> the <span class="inline_code">-http3</span> tags (<span class="inline_code">{{ site.mockserver_version }}-http3</span>, <span class="inline_code">latest-http3</span>, <span class="inline_code">snapshot-http3</span>) used to be the only images that could serve HTTP/3. They are now the same as the standard image and are kept for one more release only, so switch to the standard tag.</p>
+
+<a id="docker_container_environment_variables" class="anchor" href="#docker_container_environment_variables">&nbsp;</a>
+
+<h3>Environment Variables</h3>
+
+<p>It is possible configure MockServer behaviour through environment variables, this includes port mappings, log level and lots of <a href="/mock_server/configuration_properties.html">other properties</a> for example:</p>
+
+<pre><code class="code">docker run -d --rm -p <span class="numeric_literal">1090</span>:<span class="numeric_literal">1090</span> --env <span class="annotation">MOCKSERVER_LOG_LEVEL</span>=<span class="string_literal">TRACE</span> --env <span class="annotation">MOCKSERVER_SERVER_PORT</span>=<span class="numeric_literal">1090</span> mockserver/mockserver</code></pre>
+
+<a id="docker_heap_sizing" class="anchor" href="#docker_heap_sizing">&nbsp;</a>
+
+<h3>JVM Heap Size</h3>
+
+<p>The Docker image caps the JVM heap at 45% of the container's memory limit (it sets <span class="inline_code">-XX:MaxRAMPercentage=45.0</span>). <strong>Always run the container with an explicit memory limit</strong> &mdash; without one the JVM sizes its heap off the host's total memory and can be OOM-killed under load. <strong>512 MiB (<span class="inline_code">--memory=512m</span>) is the smallest supported limit</strong> (768&nbsp;MiB for the <span class="inline_code">-clustered</span> image when clustering is switched on &mdash; see <a href="/mock_server/performance.html#clustering_mockserver">clustering</a>); use <span class="inline_code">--memory=1g</span> or more for larger bodies or many expectations, and <span class="inline_code">--memory=2g</span> for sustained production load. The rest of the limit is not spare: the Java process needs memory the heap setting does not count &mdash; class metadata and compiled code, thread stacks, garbage-collector bookkeeping, the off-heap network buffers Netty uses for bodies, and the kernel's per-connection socket buffers &mdash; and most of it does not shrink when the heap does, so it is a bigger share of a small container. To set an explicit heap (for high-throughput use cases or large response bodies), pass <span class="inline_code">-Xmx</span> via <span class="inline_code">JAVA_TOOL_OPTIONS</span>, which disables the percentage cap &mdash; keep the heap you pin at or under 45% of the limit on a small container. If a container is killed with exit code <span class="inline_code">137</span> and <span class="inline_code">OOMKilled: true</span> (no Java stack trace &mdash; the kernel killed it), the fix is a larger <span class="inline_code">--memory</span> or a smaller heap, not a bigger one. See the <a href="/mock_server/performance.html#memory_tuning">memory tuning guide</a> for the sizing arithmetic:</p>
+
+<pre><code class="code">docker run -d --rm -p <span class="numeric_literal">1080</span>:<span class="numeric_literal">1080</span> --memory=<span class="numeric_literal">1g</span> --env <span class="annotation">JAVA_TOOL_OPTIONS</span>=<span class="string_literal">"-XX:+UseZGC -Xmx512m"</span> mockserver/mockserver</code></pre>
+
+<p>The images use the <strong>Z garbage collector (ZGC) by default</strong> (the <span class="inline_code">-aot</span> fast-start image is the exception and stays on the default collector). ZGC collects concurrently with request handling, which markedly lowers response tail latency (p95/p99) under load at the same throughput &mdash; you get this without configuring anything. It uses a little more memory than the previous default &mdash; under load it grows to its full heap and keeps it while the load lasts, in memory the kernel cannot reclaim &mdash; which the images' heap cap allows for, so it runs under sustained load within a <span class="inline_code">--memory=512m</span> limit. The collector is set through the <span class="inline_code">JAVA_TOOL_OPTIONS</span> environment variable, so <strong>if you set <span class="inline_code">JAVA_TOOL_OPTIONS</span> yourself it replaces the default</strong> &mdash; include <span class="inline_code">-XX:+UseZGC</span> when you set it for another reason (for example <span class="inline_code">JAVA_TOOL_OPTIONS="-XX:+UseZGC -Xmx512m"</span>), or you will silently fall back to the JDK's default collector. To switch back to the G1 collector, set <span class="inline_code">JAVA_TOOL_OPTIONS=-XX:+UseG1GC</span>:</p>
+<pre><code class="code">docker run -d --rm -p <span class="numeric_literal">1080</span>:<span class="numeric_literal">1080</span> --memory=<span class="numeric_literal">1g</span> --env <span class="annotation">JAVA_TOOL_OPTIONS</span>=<span class="string_literal">"-XX:+UseG1GC"</span> mockserver/mockserver</code></pre>
+
+<p><strong>How much memory does MockServer actually use?</strong> A freshly started, idle MockServer settles at roughly <strong>120 MB</strong> of container memory, and this barely changes between <span class="inline_code">--memory=512m</span> and <span class="inline_code">--memory=1g</span>. Under load it grows well beyond that: at <span class="inline_code">--memory=512m</span> on one CPU core, serving a small mocked response at 16,000 requests a second over about 4,500 open connections, the container peaked at about 79&ndash;83% of the limit (a 232 MB heap plus about 150 MB of other JVM memory and about 20 MB of kernel socket buffers). So 512 MB suits small request and response bodies (up to a few kilobytes) with a modest number of expectations; at the default <span class="inline_code">INFO</span> log level it is not enough once individual bodies reach roughly 16 KB (measured with a single expectation &mdash; a best case) &mdash; see the <a href="/mock_server/performance.html#memory_tuning">memory tuning guide</a> for body-size guidance and the levers available. <strong><span class="inline_code">--memory=256m</span> is not supported</strong> with the default settings: it starts and idles (around 95 MB), but under load the container is killed. If you must run in 256 MB, set a small explicit heap (for example <span class="inline_code">JAVA_TOOL_OPTIONS="-XX:+UseZGC -Xmx96m"</span>) and keep traffic and body sizes light &mdash; even then the container runs close to its limit (about 95% at 8,000 requests a second in our tests). Memory in use grows with your expectations, request log, response sizes and number of open connections, and rises on hosts with more CPU cores (MockServer sizes its network thread pools to the available cores).</p>
+
+<p>If MockServer becomes slow or unresponsive under sustained load, see the <a href="/mock_server/performance.html#troubleshooting_performance">troubleshooting guide</a> for recommended memory and logging configuration.</p>
+
+<a id="docker_container_default_command" class="anchor" href="#docker_container_default_command">&nbsp;</a>
+
+<h3>Modifying Default Command</h3>
+
+<p>The MockServer container entrypoint calls <code>org.mockserver.cli.Main</code> directly with <code>CMD []</code> (no default arguments). The <code>SERVER_PORT</code> environment variable defaults to <code>1080</code> in the Dockerfile. Command line options can be explicitly provided, for example:</p>
+
+<pre><code class="code">docker run --rm --name mockserver -p <span class="numeric_literal">1080</span>:<span class="numeric_literal">1090</span> mockserver/mockserver <em>-logLevel <span class="string_literal">INFO</span> -serverPort <span class="numeric_literal">1090</span> -proxyRemotePort <span class="numeric_literal">443</span> -proxyRemoteHost <span class="string_literal">mock-server.com</span></em></code></pre>
+
+<p>The application code is split across two jars in the image, <span class="inline_code">/mockserver.jar</span> (MockServer's own classes) and <span class="inline_code">/mockserver-deps.jar</span> (its dependencies), instead of the single <span class="inline_code">mockserver-netty-jar-with-dependencies.jar</span> used before 9.0.0. <span class="inline_code">/mockserver.jar</span>'s manifest carries a <span class="inline_code">Class-Path: mockserver-deps.jar</span> entry, so <span class="inline_code">java -jar /mockserver.jar</span> still runs correctly on its own &mdash; it just starts more slowly, because it bypasses the image's AppCDS shared archive (<span class="inline_code">-XX:SharedArchiveFile=/mockserver.jsa</span>, built against the full <span class="inline_code">-cp /mockserver.jar:/mockserver-deps.jar:/libs/*:/extensions/*</span> below). <span class="inline_code">java -jar /mockserver-deps.jar</span> does not run; it has no <span class="inline_code">Main-Class</span>.</p> <!-- version-ref:keep -->
+
+<p>If you override the container's <span class="keyword">entrypoint</span> rather than only its <span class="keyword">command</span> &mdash; for example a Dockerfile <span class="inline_code">ENTRYPOINT</span>, a Compose <span class="inline_code">entrypoint:</span> list, or a Kubernetes <span class="inline_code">command:</span> list &mdash; base your override on the exact <span class="inline_code">ENTRYPOINT</span> the image you run already has, rather than retyping one by hand: the Java binary's path, and whether <span class="inline_code">-XX:SharedArchiveFile</span>/<span class="inline_code">-XX:AOTCache</span> is present, differ between the standard, <span class="inline_code">-clustered</span>, <span class="inline_code">-graaljs</span> and <span class="inline_code">-aot</span> images, and a hand-written override that drops <span class="inline_code">-Dmockserver.propertyFile=/config/mockserver.properties</span> silently stops <span class="inline_code">/config</span> properties (see "Detailed MockServer Configuration" below) from loading. Check the real entrypoint first:</p>
+
+<pre><code class="code">docker inspect --format '{% raw %}{{json .Config.Entrypoint}}{% endraw %}' mockserver/mockserver:{{ site.mockserver_version }}</code></pre>
+
+<p>For the standard image, that is the following exec-form array &mdash; the same JSON-array shape a Dockerfile <span class="inline_code">ENTRYPOINT</span>, a Compose <span class="inline_code">entrypoint:</span>, or a Kubernetes <span class="inline_code">command:</span> list each expect, one argument per element (quoting <span class="inline_code">/libs/*</span> and <span class="inline_code">/extensions/*</span> inside the single <span class="inline_code">-cp</span> element, as shown, avoids the shell expanding them before Java sees them):</p>
+
+<pre><code class="code">[
+  "/usr/lib/jvm/temurin25-trimmed/bin/java",
+  "-Dfile.encoding=UTF-8",
+  "--enable-native-access=ALL-UNNAMED",
+  "-XX:MaxRAMPercentage=45.0",
+  "-XX:SharedArchiveFile=/mockserver.jsa",
+  "-cp", "/mockserver.jar:/mockserver-deps.jar:/libs/*:/extensions/*",
+  "-Dmockserver.propertyFile=/config/mockserver.properties",
+  "org.mockserver.cli.Main"
+]</code></pre>
+
+<p>Copy it verbatim and change only what you need to &mdash; for example appending <span class="inline_code">-serverPort 1080</span> as an extra element, or (more simply) leaving the entrypoint untouched and passing <span class="inline_code">-serverPort 1080</span> as the <span class="keyword">CMD</span>/<span class="keyword">command</span> instead, which needs no entrypoint override at all.</p>
+
+<a id="docker_container_extensions" class="anchor" href="#docker_container_extensions">&nbsp;</a>
+
+<h3>Adding Extensions</h3>
+
+<p>Every MockServer image loads any JAR in <span class="inline_code">/extensions</span>, so you can add your own <a href="/mock_server/extensions.html">extensions</a> without building a new image. Mount the folder read-only and name the extension classes:</p>
+
+<pre><code class="code">docker run -v $(pwd)/ext:/extensions:ro -e MOCKSERVER_EXTENSIONS=com.example.AuditExtension -p <span class="numeric_literal">1080</span>:<span class="numeric_literal">1080</span> mockserver/mockserver</code></pre>
+
+<p>When nothing is mounted at <span class="inline_code">/extensions</span>, the image starts exactly as before.</p>
+
+<h2>Detailed MockServer Configuration</h2>
+
+<p>To support configuring MockServer a <strong>mockserver.properties</strong> will be loaded from <strong>/config</strong> directory if it exists.</p>
+<p>A <strong>mockserver.properties</strong> configuration file and other related configuration files such as <a href="/mock_server/initializing_expectations.html">json expectation initialization</a>, or custom <a href="/mock_server/HTTPS_TLS.html#configuration">TLS CA, X.509 Certificate or Private Key</a> should be mapping into the <strong>/config</strong> directory.</p>
+
+For example to add configuration files in the current directory, such as <strong>mockserver.properties</strong>, map <strong>$(pwd)</strong> into <strong>/config</strong>, as follows:
+
+<pre><code class="code">docker run -v $(pwd):/config -p <span class="numeric_literal">1080</span>:<span class="numeric_literal">1080</span>  mockserver/mockserver -serverPort <span class="numeric_literal">1080</span></code></pre>
+
+<p>See <a href="/mock_server/configuration_properties.html">MockServer Configuration</a> for details of all configuration options.</p>
+
+As the <a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/blob/master/docker/Dockerfile" rel="noopener noreferrer">Docker image is based from <strong>gcr.io/distroless/java-base-debian12:nonroot</strong></a> and the user <strong>nonroot</strong> is used, we need to configure permissions in order to allow the user in the container read/write files in mounted volumes:
+
+<pre><code class="code">chmod o+r $(pwd)/mockserver.properties</code></pre>
+
+<a id="docker_extend_classpath" class="anchor" href="#docker_extend_classpath">&nbsp;</a>
+
+<h2>Extending MockServer Classpath</h2>
+
+<p>To use <a href="/mock_server/creating_expectations.html#button_response_class_callback">class callbacks</a> or an <a href="/mock_server/initializing_expectations.html#expectation_initializer_class">expectation initializer class</a> the classpath for MockServer must include the specified classes.</p>
+<p>To support adding classes to the classpath any jar files contained in the <strong>/libs</strong> directory will be added into MockServer classpath.</p>
+
+For example to add all jar files in the current directory, map <strong>$(pwd)</strong> into <strong>/libs</strong>, as follows:
+
+<pre><code class="code">docker run -v $(pwd):/libs -p <span class="numeric_literal">1080</span>:<span class="numeric_literal">1080</span>  mockserver/mockserver -serverPort <span class="numeric_literal">1080</span></code></pre>
+
+<a id="docker_healthcheck" class="anchor" href="#docker_healthcheck">&nbsp;</a>
+
+<h2>Docker Health Checks</h2>
+
+<p>MockServer Docker images include a built-in <span class="inline_code">HEALTHCHECK</span> instruction that verifies the server is serving requests. Since the images are based on <a target="_blank" href="https://github.com/GoogleContainerTools/distroless" rel="noopener noreferrer">distroless</a> containers (no shell, no <code>curl</code>), the image ships its own tiny health check program, <span class="inline_code">/mockserver-healthcheck</span>, which calls the <span class="inline_code">PUT /mockserver/status</span> endpoint over plain HTTP on <span class="inline_code">localhost</span>. It is a small native binary (about 2 MB on disk and about 4 MB of memory for the moment it runs) rather than a second Java process, so running it every 10 seconds does not eat into the container's memory limit.</p>
+
+<p>The built-in health check works automatically with no configuration required:</p>
+
+<pre><code class="code">HEALTHCHECK --interval=10s --timeout=5s --start-period=120s --retries=3
+  CMD ["/mockserver-healthcheck"]</code></pre>
+
+<p>The health check reads the <span class="inline_code">MOCKSERVER_SERVER_PORT</span> or <span class="inline_code">SERVER_PORT</span> environment variable to determine the port (the first port if several are listed; defaults to 1080). It reports healthy only when the status endpoint answers <span class="inline_code">200</span> within 3 seconds. If you set the port another way (for example <span class="inline_code">-serverPort</span> on the command line or <span class="inline_code">mockserver.serverPort</span> in a properties file), also set <span class="inline_code">SERVER_PORT</span> to the same value so the health check probes the right port. Docker reports the container as <span class="inline_code">healthy</span> once MockServer is ready to accept requests.</p>
+
+<h3>Using with Docker Compose</h3>
+
+<p>The built-in health check integrates with Docker Compose <span class="inline_code">depends_on</span> conditions:</p>
+
+<pre class="prettyprint lang-yaml code"><code class="code">services:
+  mockserver:
+    image: mockserver/mockserver:{{ site.mockserver_version }}
+    ports:
+      - "1080:1080"
+
+  app:
+    image: my-app:latest
+    depends_on:
+      mockserver:
+        condition: service_healthy</code></pre>
+
+<p>To override or disable the built-in health check, use the <span class="inline_code">healthcheck</span> key in your Compose file.</p>
+
+<h3>Kubernetes Liveness and Readiness Probes</h3>
+
+<p>In Kubernetes, use <span class="inline_code">httpGet</span> probes with the configurable liveness endpoint:</p>
+
+<pre class="prettyprint lang-yaml code"><code class="code">containers:
+  - name: mockserver
+    image: mockserver/mockserver:{{ site.mockserver_version }}
+    ports:
+      - containerPort: 1080
+    env:
+      - name: MOCKSERVER_LIVENESS_HTTP_GET_PATH
+        value: "/liveness/probe"
+    livenessProbe:
+      httpGet:
+        path: /liveness/probe
+        port: 1080
+      initialDelaySeconds: 10
+      periodSeconds: 5
+    readinessProbe:
+      httpGet:
+        path: /mockserver/ready
+        port: 1080
+      initialDelaySeconds: 5
+      periodSeconds: 5</code></pre>
+
+<p><strong>Important:</strong> the <span class="inline_code">MOCKSERVER_LIVENESS_HTTP_GET_PATH</span> environment variable must be set (as shown above) for the <span class="inline_code">livenessProbe</span> <span class="inline_code">httpGet</span> to work. This path is empty (disabled) by default &mdash; without the env var, the liveness probe will return a 404. If you copy only the <span class="inline_code">livenessProbe</span> block without the <span class="inline_code">env</span> section, it will fail. The <span class="inline_code">readinessProbe</span> uses <span class="inline_code">/mockserver/ready</span>, a fixed built-in endpoint that needs no env var: it returns 503 until expectation initializers and OpenAPI seeding complete, then 200, so traffic is not routed to the pod before the seeded mocks exist.</p>
+
+<p>The MockServer Helm chart configures these probes automatically.</p>
+
+<h3>Amazon ECS Health Check</h3>
+
+<p>For ECS task definitions, the built-in <span class="inline_code">HEALTHCHECK</span> in the Docker image is used automatically. Alternatively, configure an explicit health check &mdash; call the bundled probe directly, because the image has no shell or <code>curl</code> for a <span class="inline_code">CMD-SHELL</span> command to use:</p>
+
+<pre class="prettyprint lang-json code"><code class="code">{
+  "containerDefinitions": [{
+    "name": "mockserver",
+    "image": "mockserver/mockserver:{{ site.mockserver_version }}",
+    "healthCheck": {
+      "command": ["CMD", "/mockserver-healthcheck"],
+      "interval": 10,
+      "timeout": 5,
+      "retries": 3,
+      "startPeriod": 120
+    }
+  }]
+}</code></pre>
+
+<p><strong>Note:</strong> The ECS <span class="inline_code">CMD-SHELL</span> health check runs on the host, not inside the distroless container, so <span class="inline_code">curl</span> is available.</p>
+
+<p>For more information on the liveness endpoint configuration, see <a href="/mock_server/configuration_properties.html#liveness_configuration">liveness configuration properties</a>.</p>
+
+<p>A selection of commonly used environment variables is shown in the Docker Compose examples below. <code>MOCKSERVER_MAX_LLM_CONVERSATION_BODY_SIZE</code> controls the maximum request body size that conversation-aware LLM matchers will parse (default 1 MiB; valid range 16 KiB&ndash;64 MiB). See <a href="/mock_server/performance.html#button_configuration_max_llm_conversation_body_size">Performance Configuration</a> for details.</p>
+
+<a id="docker_compose" class="anchor" href="#docker_compose">&nbsp;</a>
+
+<h2>Docker Compose</h2>
+
+<p>MockServer can be run using <a target="_blank" href="https://docs.docker.com/compose/" rel="noopener noreferrer">docker compose</a> by adding the container as a service.</p>
+
+<p>For ready-to-run, one-command starting points &mdash; mock from an OpenAPI spec, a record/replay proxy, a contract-validating proxy, or a chaos proxy &mdash; see the <a target="_blank" href="https://github.com/mock-server/mockserver-monorepo/tree/master/examples/docker-compose" rel="noopener noreferrer">Docker Compose recipes</a>.</p>
+
+<p>The MockServer container uses an <span class="keyword">entrypoint</span>, so it is possible to configure the MockServer by specifying the command line flags using by specifying the <span class="keyword">command</span>, as follows:</p>
+
+<pre class="prettyprint lang-yaml code"><code class="code">services:
+  mockServer:
+    image: mockserver/mockserver:{{ site.mockserver_version }}
+    command: -logLevel DEBUG -serverPort 1090 -proxyRemotePort 80 -proxyRemoteHost www.mock-server.com
+    ports:
+      - 1080:1090</code></pre>
+
+<p>It is also possible to configure the MockServer by setting <span class="keyword">environment</span> variables, as follows:</p>
+
+<pre class="prettyprint lang-yaml code"><code class="code">services:
+  mockServer:
+    image: mockserver/mockserver:{{ site.mockserver_version }}
+    ports:
+      - 1080:1090
+    environment:
+      MOCKSERVER_MAX_EXPECTATIONS: 100
+      MOCKSERVER_MAX_HEADER_SIZE: 8192
+      MOCKSERVER_MAX_LLM_CONVERSATION_BODY_SIZE: 1048576</code></pre>
+
+<p>It is also possible to configure the MockServer by mounting a volume containing a properties file or JSON expectation initializer, as follows:</p>
+
+<pre class="prettyprint lang-yaml code"><code class="code">services:
+  mockServer:
+    image: mockserver/mockserver:{{ site.mockserver_version }}
+    ports:
+      - 1080:1080
+    environment:
+      MOCKSERVER_PROPERTY_FILE: /config/mockserver.properties
+      MOCKSERVER_INITIALIZATION_JSON_PATH: /config/initializerJson.json
+    volumes:
+      - type: bind
+        source: .
+        target: /config</code></pre>
+
+<p>To initialise MockServer using an OpenAPI specification file, mount the file and set the <strong>MOCKSERVER_INITIALIZATION_OPENAPI_PATH</strong> environment variable:</p>
+
+<pre class="prettyprint lang-yaml code"><code class="code">services:
+  mockServer:
+    image: mockserver/mockserver:{{ site.mockserver_version }}
+    ports:
+      - 1080:1080
+    environment:
+      MOCKSERVER_INITIALIZATION_OPENAPI_PATH: /config/petstore.yaml
+    volumes:
+      - type: bind
+        source: .
+        target: /config</code></pre>
